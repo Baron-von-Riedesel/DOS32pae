@@ -24,13 +24,31 @@ DGROUP group _TEXT
 
 ?IRQ0TORM equ 1			;1=route IRQ 0 (clock) to real-mode
 ?IRQ1TORM equ 1			;1=route IRQ 1 (keyb) to real-mode
-?IDTADDR  equ 100000h	;linear address of IDT
+
+;--- define "conventional" memory region seen by the application.
+;--- default is 00000-FFFFF (begin 0, size 256 pages).
+;--- ?CONVBEG: if the begin isn't 0, physical page 0 will be mapped in
+;--- somewhere else, because access to the IVT is necessary (int 31h, ax=300h).
+;--- ?CONVSIZE: it's possible to reduce the size, if there's no
+;--- need to access the BIOS in protected-mode.
+
+?CONVBEG  equ 0			;start page of "conventional" memory
+?CONVSIZE equ 256		;size of "conventional" memory in 4k-pages
+
 ?MPIC     equ 78h		;base master PIC
 ?SPIC     equ 70h		;base slave PIC
-?I31301   equ 1			;support int 31h, ax=301h
-?I31504   equ 1			;support int 31h, ax=504h (uncommitted memory only)
-?I31518   equ 1			;support int 31h, ax=518h map physical memory
+?I31301   equ 1			;1=support int 31h, ax=301h
+?I31504   equ 1			;1=support int 31h, ax=504h (uncommitted memory only)
+?I31518   equ 1			;1=support int 31h, ax=518h map physical memory
+?DIRVIO   equ 1			;1=direct video output for int 41h, 0=use BIOS
 
+ife ?CONVBEG
+?PG0ADDR  equ 0
+?IDTADDR  equ (?CONVBEG+?CONVSIZE)*4096 ;linear address of IDT
+else
+?PG0ADDR  equ (?CONVBEG+?CONVSIZE)*4096
+?IDTADDR  equ ?PG0ADDR+1000h			;linear address of IDT
+endif
 
 ifdef __JWASM__
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
@@ -168,7 +186,8 @@ storedIntS label dword
         dd 8 dup (?)
 endif
 
-	.const
+_DATA1 segment word "DATA"
+DGROUP group _DATA1
 
 MEMBLK struct 4
 wHdl   dw ?
@@ -181,6 +200,9 @@ MEMBLK ends
 ;--- table can grow dynamically.
 xmshdltab label MEMBLK
 xms1 MEMBLK <0,0>  ;handle of allocated XMS block
+_DATA1 ends
+
+	.const
 
 intstruc struct
 intno db ?
@@ -518,9 +540,15 @@ make_exc_gates:
     mov [pPageDir],eax
     push esi
     inc esi
-    invoke CreateAddrSpace, 0, 256+1, esi
+ife ?CONVBEG
+    invoke CreateAddrSpace, ?CONVBEG*4096, ?CONVSIZE+1, esi
     add esi, eax
-    invoke MapPages, 0, 256, 0
+else
+    invoke CreateAddrSpace, ?CONVBEG*4096, ?CONVSIZE+2, esi
+    add esi, eax
+    invoke MapPages, ?PG0ADDR, 1, 0
+endif
+    invoke MapPages, ?CONVBEG*4096, ?CONVSIZE, ?CONVBEG
     pop eax
     invoke MapPages, ?IDTADDR, 1, eax
     mov eax,[esp]
@@ -546,6 +574,7 @@ if ?SPIC ne 70h
     in al,0A1h
     mov bPICS,al
 endif
+    @dprintf "start16: switching to pm"
 
     cli
     mov dx,?SPIC shl 8 or ?MPIC
@@ -1098,6 +1127,41 @@ keyboard16 proc
 keyboard16 endp
 endif
 
+if ?CONVBEG		;use BIOS for output if page 0 isn't mapped in protected-mode
+int4116 proc far
+    cli
+    push ebx
+    push ecx
+    push ds
+    push es
+    push fs
+    push gs
+    mov bx,ax
+    mov ecx,esp
+    mov ax,SEL_DATA16
+    mov ss,ax
+    assume ss:DGROUP
+    mov sp,ss:[wStkBot]
+    mov ss:[dwESP],ecx
+    call switch2rm
+    mov ax,bx
+    mov ah,0Eh
+    xor bx,bx
+    int 10h
+    cli
+    call switch2pm
+    lss esp,fword ptr ss:[dwESP]
+    assume ss:nothing
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    pop ecx
+    pop ebx
+    retd
+int4116 endp
+endif
+
 if ?I31504
 ;--- allocate address space:
 ;--- EBX: linear address (or 0)
@@ -1262,10 +1326,21 @@ HandleRelocs endp
 endif
 
 ifdef _DEBUG
-	include printf.inc
+    include printf.inc
 endif
 
 _TEXT ends
+
+@jmp16 macro ofs
+    db 66h,0eah
+    dw offset ofs
+    dw SEL_CODE16
+endm
+@call16 macro ofs
+    db 09ah
+    dd offset ofs
+    dw SEL_CODE16
+endm
 
 _TEXT32 segment use32 para public 'CODE'
 
@@ -1281,22 +1356,31 @@ start32 endp
 
 ;--- debug output helpers ( int 41h )
 
+if ?DIRVIO	; direct video output - don't use BIOS
+
+?VIOCOLS equ ?PG0ADDR+44Ah
+?VIOPBEG equ ?PG0ADDR+44Eh
+?VIOCSR  equ ?PG0ADDR+450h
+?VIOPG   equ ?PG0ADDR+462h
+?VIOCRT  equ ?PG0ADDR+463h
+?VIOROWS equ ?PG0ADDR+484h
+
 ;--- set text mode cursor
 set_cursor proc
     pushad
     push ds
     push SEL_FLATDS
     pop ds
-    MOVZX esi, BYTE PTR ds:[462h]         ;page
-    MOVZX ecx, BYTE PTR ds:[esi*2+450h+1] ;get cursor pos ROW
-    MOVZX eax, WORD PTR ds:[44Ah]         ;cols
+    MOVZX esi, BYTE PTR ds:[?VIOPG]
+    MOVZX ecx, BYTE PTR ds:[esi*2+?VIOCSR+1] ;get cursor pos ROW
+    MOVZX eax, WORD PTR ds:[?VIOCOLS]
     MUL ecx
-    MOVZX edx, BYTE PTR ds:[esi*2+450h]   ;get cursor pos COL
+    MOVZX edx, BYTE PTR ds:[esi*2+?VIOCSR+0] ;get cursor pos COL
     ADD eax, edx
-    movzx ecx,word ptr ds:[44eh]
+    movzx ecx,word ptr ds:[?VIOPBEG]
     shr ecx,1
     add ecx, eax
-    mov dx,ds:[463h]
+    mov dx,ds:[?VIOCRT]
     mov ah,ch
     mov al,0Eh
     out dx,ax
@@ -1315,9 +1399,9 @@ scroll_screen proc
     CLD
     push esi
     mov edi,ebp
-    movzx eax,word ptr ds:[44Ah]
+    movzx eax,word ptr ds:[?VIOCOLS]
     push eax
-    MOV CL, ds:[484h]
+    MOV CL, ds:[?VIOROWS]
     lea esi, [edi+2*eax]
     mul cl
     mov ecx,eax
@@ -1340,18 +1424,18 @@ WriteChr proc
     push ds
     pop es
     MOV edi,0B8000h
-    CMP BYTE ptr ds:[463h],0B4h
+    CMP BYTE ptr ds:[?VIOCRT],0B4h
     JNZ @F
     XOR DI,DI
 @@:
-    movzx ebx, WORD PTR ds:[44Eh]   ;page start
+    movzx ebx, WORD PTR ds:[?VIOPBEG]   ;page start
     ADD edi, ebx
-    MOVZX ebx, BYTE PTR ds:[462h]
+    MOVZX ebx, BYTE PTR ds:[?VIOPG]
     mov ebp, edi
-    MOVZX ecx, BYTE PTR ds:[ebx*2+450h+1] ;ROW
-    MOVZX eax, WORD PTR ds:[44Ah]
+    MOVZX ecx, BYTE PTR ds:[ebx*2+?VIOCSR+1] ;ROW
+    MOVZX eax, WORD PTR ds:[?VIOCOLS]
     MUL ecx
-    MOVZX edx, BYTE PTR ds:[ebx*2+450h]  ;COL
+    MOVZX edx, BYTE PTR ds:[ebx*2+?VIOCSR+0] ;COL
     ADD eax, edx
     MOV DH,CL
     LEA edi, [edi+eax*2]
@@ -1363,23 +1447,32 @@ WriteChr proc
     MOV [edi], AL
     MOV byte ptr [edi+1], 07
     INC DL
-    CMP DL, BYTE PTR ds:[44Ah]
+    CMP DL, BYTE PTR ds:[?VIOCOLS]
     JB @F
 newline:
     MOV DL, 00
     INC DH
-    CMP DH, BYTE PTR ds:[484h]
+    CMP DH, BYTE PTR ds:[?VIOROWS]
     JBE @F
     DEC DH
     CALL scroll_screen
 @@:
-    MOV ds:[ebx*2+450h],DX
+    MOV ds:[ebx*2+?VIOCSR],DX
 skipchar:
     popad
     pop es
     pop ds
     RET
 WriteChr endp
+
+else
+
+WriteChr proc
+    @call16 int4116
+    ret
+WriteChr endp
+
+endif
 
 WriteStrng proc
     cld
@@ -1462,8 +1555,9 @@ excno = 0
     mov ax,2
     int 41h
     pop eax
+    push eax
     call WriteB
-if 0
+if 1
     mov si, CStr32(" base=")
     mov ax,2
     int 41h
@@ -1474,17 +1568,17 @@ endif
     mov si, CStr32(" errcode=")
     mov ax,2
     int 41h
-    mov eax,[esp+0]
+    mov eax,[esp+4]
     call WriteDW
     mov si, CStr32(" cs:eip=")
     mov ax,2
     int 41h
-    mov ax,[esp+8]
+    mov ax,[esp+12]
     call WriteW
     mov dl,':'
     xor ax,ax
     int 41h
-    mov eax,[esp+4]
+    mov eax,[esp+8]
     call WriteDW
 if 0
     mov si, CStr32(" edi=")
@@ -1493,23 +1587,22 @@ if 0
     mov eax, edi
     call WriteDW
 endif
+if 1
+    cmp byte ptr [esp],0Eh
+    jnz @F
+    mov si, CStr32(" cr2=")
+    mov ax,2
+    int 41h
+    mov eax,cr2
+    call WriteDW
+@@:
+endif
     mov dl,lf
     xor ax,ax
     int 41h
     mov ax,4cffh
     int 21h
     align 4
-
-@jmp16 macro ofs
-    db 66h,0eah
-    dw offset ofs
-    dw SEL_CODE16
-endm
-@call16 macro ofs
-    db 09ah
-    dd offset ofs
-    dw SEL_CODE16
-endm
 
 ;--- clock and keyboard interrupts
 
@@ -1641,11 +1734,11 @@ al_i3130x textequ <byte ptr [esp+11*4]>
 
     movzx ebx,bl
 if ?I31301
-	mov eax,[esi].RMCS.rCSIP
-	cmp al_i3130x,0
-	jnz @F
+    mov eax,[esi].RMCS.rCSIP
+    cmp al_i3130x,0
+    jnz @F
 endif
-    mov eax,[ebx*4]
+    mov eax,[ebx*4 + ?PG0ADDR]
 @@:
     mov bx,[wStkBot] 
     sub bx,34h
@@ -1737,50 +1830,50 @@ endif
 
 if ?I31504
 int31_504:
-	push 0
-	pushw DGROUP
-	pushw offset int31_50416
-	push 0
-	push 0
-	pushw 3202h
-	pushad
-	mov edi,esp
-	mov ax,301h
-	int 31h
-	mov edi,[esp].RMCS.rEDI
-	jc @F
-	test [esp].RMCS.rFlags,1
-	jnz @F
-	mov ebx,[esp].RMCS.rEBX
-	mov esi,[esp].RMCS.rESI
-	add esp,sizeof RMCS
-	iretd
+    push 0
+    pushw DGROUP
+    pushw offset int31_50416
+    push 0
+    push 0
+    pushw 3202h
+    pushad
+    mov edi,esp
+    mov ax,301h
+    int 31h
+    mov edi,[esp].RMCS.rEDI
+    jc @F
+    test [esp].RMCS.rFlags,1
+    jnz @F
+    mov ebx,[esp].RMCS.rEBX
+    mov esi,[esp].RMCS.rESI
+    add esp,sizeof RMCS
+    iretd
 @@:
-	add esp,sizeof RMCS
-	jmp ret_with_carry
+    add esp,sizeof RMCS
+    jmp ret_with_carry
 
 endif
 if ?I31518
 int31_518:
-	push 0
-	pushw DGROUP
-	pushw offset int31_51816
-	push 0
-	push 0
-	pushw 3202h
-	pushad
-	mov edi,esp
-	mov ax,301h
-	int 31h
-	mov edi,[esp].RMCS.rEDI
-	jc @F
-	test [esp].RMCS.rFlags,1
-	jnz @F
-	add esp,sizeof RMCS
-	iretd
+    push 0
+    pushw DGROUP
+    pushw offset int31_51816
+    push 0
+    push 0
+    pushw 3202h
+    pushad
+    mov edi,esp
+    mov ax,301h
+    int 31h
+    mov edi,[esp].RMCS.rEDI
+    jc @F
+    test [esp].RMCS.rFlags,1
+    jnz @F
+    add esp,sizeof RMCS
+    iretd
 @@:
-	add esp,sizeof RMCS
-	jmp ret_with_carry
+    add esp,sizeof RMCS
+    jmp ret_with_carry
 
 endif
 

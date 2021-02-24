@@ -80,10 +80,16 @@
 
    The PE image that Dos32pae is bound to will be loaded at its preferred load
   address, so no relocations are needed ( the load address must not be in 
-  conventional memory). The stack's located just behind the image. As default,
-  the IDT is mapped at linear address  0x100000, just above conventional memory.
-  Paging tables aren't mapped at all - hence the full address space from 
-  0x101000 up to 0xffffffff may be used by the application.
+  conventional memory). The stack's located just behind the image.
+  
+  As default, the first MB of memory ("conventional" memory) is mapped at
+  0x00000-0xFFFFF. Behind that comes the IDT, at linear address 0x100000.
+  Begin and size of "conventional" memory can be changed to some degree, 
+  though. It's possible to reduce the size if no BIOS access is needed in
+  protected-mode, or access to page 0 can be disabled to detect null-pointers.
+
+  Paging tables aren't mapped at all - hence the full address space above
+  the IDT up to 0xffffffff may be used by the application.
 
 
   5. License

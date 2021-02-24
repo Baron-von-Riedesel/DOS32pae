@@ -2,7 +2,7 @@
 ;--- sample showing how huge amounts of memory can be allocated.
 ;--- XMS v3.5 is used here, physical memory is allocated from the pool beyond
 ;--- 4 GB and mapped at linear address 0x400000.
-;--- the preferred load address of the image ix 0x200000h.
+;--- the preferred load address of the image is 0x200000h.
 ;--- requirements: needs 8 GB of RAM!
 
     .386
@@ -104,7 +104,10 @@ local rmcs:RMCS
 
     @dprintf "allocmem: calling int 31h, ax=301h (ax=0C900h)"
     mov rmcs.rAX,0C900h
-    mov rmcs.rEDX,?BLOCKSIZE * 1024 + 3 ;size in kB (add 3 kB for page alignment)
+	mov eax, dwSize
+	shl eax,10	;convert size to kB
+	add eax,3	;add 3 kB for page alignment
+    mov rmcs.rEDX,eax
     mov cx,0
     mov ax,0301h
     int 31h
