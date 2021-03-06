@@ -710,10 +710,10 @@ CreateAddrSpace proc stdcall uses es esi linaddr:dword, pages:dword, physpage:dw
     @dprintf "CreateAddrSpace() ok, esi=%lX, eax=%lX", esi, eax
     clc
 ifdef _DEBUG
-	ret
+    ret
 exit:
-	@dprintf "CreateAddrSpace() failed, linaddr=%lX, pages=%lX, ebx=%lX", linaddr, pages, ebx
-	stc
+    @dprintf "CreateAddrSpace() failed, linaddr=%lX, pages=%lX, ebx=%lX", linaddr, pages, ebx
+    stc
 else
 exit:
 endif
@@ -994,10 +994,8 @@ backtoreal proc
         mov dx,[si+xmshdltab-sizeof MEMBLK].MEMBLK.wHdl
         mov ah,0dh          ;unlock handle
         call xmsaddr
-if 1
         mov ah,0ah          ;free EMB
         call xmsaddr
-endif
         sub si,sizeof MEMBLK
     .endw
     cmp xmsaddr,0
@@ -1095,13 +1093,12 @@ savestate:
     push ax
     jmp switch2rm
 
-reststate:
+reststate_iretd:
     cli
     call switch2pm
     mov ax,SEL_FLATDS
     mov ss,ax
     mov esp,ecx
-reststate_x:
     pop gs
     pop fs
     pop es
@@ -1115,7 +1112,7 @@ if ?IRQ0TORM
 clock16 proc
     call savestate
     int 08h
-    jmp reststate
+    jmp reststate_iretd
 clock16 endp
 endif
 
@@ -1123,41 +1120,38 @@ if ?IRQ1TORM
 keyboard16 proc
     call savestate
     int 09h
-    jmp reststate
+    jmp reststate_iretd
 keyboard16 endp
 endif
 
-if ?CONVBEG		;use BIOS for output if page 0 isn't mapped in protected-mode
+ife ?DIRVIO	;use BIOS for debug output
 int4116 proc far
     cli
-    push ebx
-    push ecx
-    push ds
-    push es
-    push fs
-    push gs
     mov bx,ax
-    mov ecx,esp
-    mov ax,SEL_DATA16
-    mov ss,ax
-    assume ss:DGROUP
-    mov sp,ss:[wStkBot]
-    mov ss:[dwESP],ecx
-    call switch2rm
+    call savestate
     mov ax,bx
-    mov ah,0Eh
     xor bx,bx
+    mov ah,0Eh
+    cmp al,10
+    jnz @F
+    mov al,13
     int 10h
+    mov ax,0E0Ah
+@@:
+    int 10h
+reststate_retd::
     cli
-    call switch2pm
-    lss esp,fword ptr ss:[dwESP]
-    assume ss:nothing
+    call switch2pm	;modifies flags!
+    mov ax,SEL_FLATDS
+    mov ss,ax
+    mov esp,ecx
     pop gs
     pop fs
     pop es
     pop ds
     pop ecx
-    pop ebx
+    pop eax
+    add esp,2
     retd
 int4116 endp
 endif
@@ -1173,6 +1167,7 @@ int31_50416 proc far
 
 local linad:dword
 local dwSize:dword
+local adjLinAddr:byte
 local handle:word
 
     push cs
@@ -1181,6 +1176,7 @@ local handle:word
     test bx,0fffh
     jnz error
     cmp ebx,0
+    setz adjLinAddr
     jnz @F
     mov ebx,nxtLinAddr
 @@:
@@ -1240,6 +1236,10 @@ local handle:word
     shr esi,12
     invoke CreateAddrSpace, linad, esi, eax
     jc error
+    .if adjLinAddr
+        shl esi,12
+        add nxtLinAddr, esi
+    .endif
     mov ebx,linad
     movzx esi,handle
     clc
@@ -1326,7 +1326,7 @@ HandleRelocs endp
 endif
 
 ifdef _DEBUG
-    include printf.inc
+    include dprintf.inc
 endif
 
 _TEXT ends
@@ -1468,8 +1468,12 @@ WriteChr endp
 else
 
 WriteChr proc
+
+    push ebx
     @call16 int4116
+    pop ebx
     ret
+
 WriteChr endp
 
 endif
@@ -1650,27 +1654,17 @@ int21 proc
     cmp ah,4Ch
     jz int21_4c
     and byte ptr [esp+2*4],0FEh ;clear carry flag
-    sub esp,34h ; sizeof RMCS+2
-    mov [esp].RMCS.rEDI, edi
-    mov [esp].RMCS.rESI, esi
-    mov [esp].RMCS.rEBP, ebp
-    mov [esp].RMCS.rEBX, ebx
-    mov [esp].RMCS.rEDX, edx
-    mov [esp].RMCS.rECX, ecx
-    mov [esp].RMCS.rEAX, eax
+    sub esp,14h
+    pushad
     xor ecx,ecx
     mov [esp].RMCS.rFlags, 0202h
-    mov [esp].RMCS.rES, cx
-    mov [esp].RMCS.rDS, cx
-    mov [esp].RMCS.rFS, cx
-    mov [esp].RMCS.rGS, cx
+    mov dword ptr [esp].RMCS.rES,ecx
+    mov dword ptr [esp].RMCS.rFS,ecx
     mov [esp].RMCS.rSSSP, ecx
-    push edi
-    lea edi,[esp+4]
+    mov edi,esp
     mov bx,21h
     mov ax,0300h
     int 31h
-    pop edi
     jc int21_carry
     mov al,byte ptr [esp].RMCS.rFlags
     mov byte ptr [esp+34h+2*4],al    ;set CF,ZF,...
@@ -1678,30 +1672,29 @@ int21 proc
 int21_carry:
     or  byte ptr [esp+34h+2*4],1    ;set carry flag
 @@:
-    mov edi, [esp].RMCS.rEDI
-    mov esi, [esp].RMCS.rESI
-    mov ebp, [esp].RMCS.rEBP
-    mov ebx, [esp].RMCS.rEBX
-    mov edx, [esp].RMCS.rEDX
-    mov ecx, [esp].RMCS.rECX
-    mov eax, [esp].RMCS.rEAX
-    lea esp,[esp+34h]
+    popad
+    lea esp,[esp+14h]
     iretd
 int21_4c:
-    db 66h,0EAh
-    dw offset backtoreal, SEL_CODE16
+    @jmp16 backtoreal
 int21 endp
 
 int31 proc
     and byte ptr [esp+2*4],0FEh	;clear carry flag
-    cmp ax,0203h	;set exception vector?
-    jz int31_203
     cmp ax,0300h	;simulate real-mode interrupt?
     jz int31_300
 if ?I31301
     cmp ax,0301h	;call real-mode far proc with RETF frame?
     jz int31_301
 endif
+    cmp ax,0202h	;get exception vector?
+    jz int31_202
+    cmp ax,0203h	;set exception vector?
+    jz int31_203
+    cmp ax,0204h	;get interrupt vector?
+    jz int31_204
+    cmp ax,0205h	;set interrupt vector?
+    jz int31_205
 if ?I31504
     cmp ax,0504h	;allocate uncommitted memory 
     jz int31_504
@@ -1804,6 +1797,7 @@ endif
 int31_203:
     cmp bl,20h
     jae ret_with_carry
+int31_205:
     push eax
     push edi
 
@@ -1827,54 +1821,70 @@ endif
     pop edi
     pop eax
     iretd
+int31_202:	;get exception vector BL in CX:EDX
+    cmp bl,20h
+    jae ret_with_carry
+int31_204:	;get interrupt vector BL in CX:EDX
+    movzx ecx,bl
+    lea ecx,[ecx*8+?IDTADDR]
+    mov dx,[ecx+6]
+    shl edx,16
+    mov dx,[ecx+0]
+    mov cx,[ecx+2]
+    iretd
 
 if ?I31504
 int31_504:
-    push 0
-    pushw DGROUP
-    pushw offset int31_50416
-    push 0
-    push 0
-    pushw 3202h
-    pushad
-    mov edi,esp
-    mov ax,301h
-    int 31h
-    mov edi,[esp].RMCS.rEDI
-    jc @F
-    test [esp].RMCS.rFlags,1
-    jnz @F
-    mov ebx,[esp].RMCS.rEBX
-    mov esi,[esp].RMCS.rESI
-    add esp,sizeof RMCS
-    iretd
+;--- create a RMCS onto stack
+	sub esp,2	;adjustment to make stack dword aligned
+	push 0
+	pushw DGROUP
+	pushw offset int31_50416
+	push 0
+	push 0
+	pushw 3202h
+	pushad
+	push edi
+	lea edi,[esp+4]
+	mov ax,301h
+	int 31h
+	pop edi
+	jc @F
+	test [esp].RMCS.rFlags,1
+	jnz @F
+	mov ebx,[esp].RMCS.rEBX
+	mov esi,[esp].RMCS.rESI
+	add esp,34h
+	iretd
 @@:
-    add esp,sizeof RMCS
-    jmp ret_with_carry
-
+	add esp,34h
+	jmp ret_with_carry
 endif
+
 if ?I31518
 int31_518:
-    push 0
-    pushw DGROUP
-    pushw offset int31_51816
-    push 0
-    push 0
-    pushw 3202h
-    pushad
-    mov edi,esp
-    mov ax,301h
-    int 31h
-    mov edi,[esp].RMCS.rEDI
-    jc @F
-    test [esp].RMCS.rFlags,1
-    jnz @F
-    add esp,sizeof RMCS
-    iretd
+;--- create a RMCS onto stack
+	sub esp,2	;adjustment to make stack dword aligned
+	push 0
+	pushw DGROUP
+	pushw offset int31_51816
+	push 0
+	push 0
+	pushw 3202h
+	pushad
+	push edi
+	lea edi,[esp+4]
+	mov ax,301h
+	int 31h
+	pop edi
+	jc @F
+	test [esp].RMCS.rFlags,1
+	jnz @F
+	add esp,34h
+	iretd
 @@:
-    add esp,sizeof RMCS
-    jmp ret_with_carry
-
+	add esp,34h
+	jmp ret_with_carry
 endif
 
 int31 endp

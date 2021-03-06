@@ -59,7 +59,10 @@
    Dos32pae installs a tiny subset of the DPMI API. The functions that are
   supported are:
    - int 21h, ah=4Ch: terminate program
+   - int 31h, ax=202h: get exception vector BL in CX:EDX
    - int 31h, ax=203h: set exception vector BL to CX:EDX
+   - int 31h, ax=204h: get interrupt vector BL in CX:EDX
+   - int 31h, ax=205h: set interrupt vector BL to CX:EDX
    - int 31h, ax=300h: simulate real-mode interrupt BL, EDI -> RMCS.
    - int 31h, ax=301h: call real-mode far proc with RETF frame, EDI -> RMCS.
    - int 31h, ax=504h: allocate uncommitted memory (=address space).

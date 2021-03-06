@@ -1,20 +1,5 @@
 
-;--- simple printf() implementation
-
-handle_char proc
-
-	mov dl,al
-	cmp al,10
-	jnz @F
-	mov dl,13
-	call @F
-	mov dl,10
-@@:
-	mov ah,2
-	int 21h
-	ret
-
-handle_char endp
+;--- dprintf(), debug displays in 16-bit
 
 ;--- ltob(long n, char * s, int base);
 ;--- convert long to string
@@ -209,6 +194,19 @@ output_string:	;display string at ds:si
 		call handle_char
 		dec bx
 	.endw
+	retn
+
+handle_char:
+
+	mov dl,al
+	cmp al,10
+	jnz @F
+	mov dl,13
+	call @F
+	mov dl,10
+@@:
+	mov ah,2
+	int 21h
 	retn
 
 dprintf ENDP

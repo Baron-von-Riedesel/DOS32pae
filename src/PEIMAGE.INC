@@ -1,6 +1,6 @@
 
 ;--- some constants and structures
-;--- for 64-bit PE images.
+;--- for 32-bit PE images.
 
 SECTION_QUERY       equ 00001h
 SECTION_MAP_WRITE   equ 00002h
@@ -63,9 +63,6 @@ IMAGE_FILE_HEADER ends
 
 ;*** Characteristics ***
 
-; 0400: If Image is on removable media, copy and run from the swap file.
-; 0800: If Image is on Net, copy and run from the swap file.
-
 IMAGE_FILE_RELOCS_STRIPPED     equ 0001h
 IMAGE_FILE_EXECUTABLE_IMAGE    equ 0002h
 IMAGE_FILE_LINE_NUMS_STRIPPED  equ 0004h
@@ -74,8 +71,6 @@ IMAGE_FILE_16BIT_MACHINE       equ 0040h
 IMAGE_FILE_BYTES_REVERSED_LO   equ 0080h  ; Bytes of machine word are reversed.
 IMAGE_FILE_32BIT_MACHINE       equ 0100h
 IMAGE_FILE_DEBUG_STRIPPED      equ 0200h  ; Debugging info stripped from file in .DBG file
-IMAGE_FILE_REMOVABLE_RUN_FROM_SWAP equ 0400h
-IMAGE_FILE_NET_RUN_FROM_SWAP   equ 0800h
 IMAGE_FILE_SYSTEM              equ 1000h  ; System File.
 IMAGE_FILE_DLL                 equ 2000h
 IMAGE_FILE_UP_SYSTEM_ONLY      equ 4000h  ; File should only be run on a UP machine
@@ -92,8 +87,6 @@ Size_			  DWORD   ?
 IMAGE_DATA_DIRECTORY ends
 
 IMAGE_NUMBEROF_DIRECTORY_ENTRIES    equ 16
-
-
 
 IMAGE_OPTIONAL_HEADER32  struct           ;size = 28 + 68 + 128 = 224
                          ;standard, size=28
@@ -131,39 +124,6 @@ NumberOfRvaAndSizes     dd ?	;92
 DataDirectory IMAGE_DATA_DIRECTORY	IMAGE_NUMBEROF_DIRECTORY_ENTRIES dup (<>)	
 IMAGE_OPTIONAL_HEADER32  ends
 
-IMAGE_OPTIONAL_HEADER64 struct
-Magic					dw ?	;0
-MajorLinkerVersion		db ?
-MinorLinkerVersion		db ?
-SizeOfCode				dd ?	;4	
-SizeOfInitializedData	dd ?	;8
-SizeOfUninitializedData dd ?	;12
-AddressOfEntryPoint     dd ?	;16
-BaseOfCode				dd ?	;20
-ImageBase				dq ?	;24
-SectionAlignment		dd ?	;32
-FileAlignment			dd ?	;36
-MajorOperatingSystemVersion   dw ?	;40
-MinorOperatingSystemVersion   dw ?
-MajorImageVersion		dw ?	;44
-MinorImageVersion		dw ?	
-MajorSubsystemVersion	dw ?	;48
-MinorSubsystemVersion	dw ?
-Win32VersionValue		dd ?	;52
-SizeOfImage				dd ?	;56
-SizeOfHeaders			dd ?	;60
-CheckSum				dd ?	;64
-Subsystem				dw ?	;68
-DllCharacteristics		dw ?
-SizeOfStackReserve		dq ?	;72
-SizeOfStackCommit		dq ?	;76
-SizeOfHeapReserve		dq ?	;80
-SizeOfHeapCommit		dq ?	;84
-LoaderFlags				dd ?	;88
-NumberOfRvaAndSizes     dd ?	;92
-DataDirectory IMAGE_DATA_DIRECTORY	IMAGE_NUMBEROF_DIRECTORY_ENTRIES dup (<>)	
-IMAGE_OPTIONAL_HEADER64 ends
-
 ; Subsystem Values
 
 IMAGE_SUBSYSTEM_UNKNOWN       equ    0   ;/ Unknown subsystem.
@@ -185,14 +145,14 @@ IMAGE_DIRECTORY_ENTRY_SECURITY     equ   4  ;// Security Directory
 IMAGE_DIRECTORY_ENTRY_BASERELOC    equ   5  ;// Base Relocation Table
 IMAGE_DIRECTORY_ENTRY_DEBUG        equ   6  ;// Debug Directory
 IMAGE_DIRECTORY_ENTRY_COPYRIGHT    equ   7  ;// Description String
-IMAGE_DIRECTORY_ENTRY_ARCHITECTURE   equ   7   ;// Architecture Specific Data
+IMAGE_DIRECTORY_ENTRY_ARCHITECTURE equ   7  ;// Architecture Specific Data
 IMAGE_DIRECTORY_ENTRY_GLOBALPTR    equ   8  ;// Machine Value (MIPS GP)
 IMAGE_DIRECTORY_ENTRY_TLS          equ   9  ;// TLS Directory
 IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG  equ  10  ;// Load Configuration Directory
 IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT equ  11  ;// Bound Import Directory in headers
 IMAGE_DIRECTORY_ENTRY_IAT          equ  12  ;// Import Address Table
-IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT   equ  13   ;// Delay Load Import Descriptors
-IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR equ  14   ;// COM Runtime descriptor
+IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT equ  13  ;// Delay Load Import Descriptors
+IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR equ 14 ;// COM Runtime descriptor
 
 
 IMAGE_NT_HEADERS struct
@@ -200,7 +160,6 @@ Signature		dd ?		           ;00 "PE"
 FileHeader		IMAGE_FILE_HEADER <>
 OptionalHeader	IMAGE_OPTIONAL_HEADER32 <>
 IMAGE_NT_HEADERS ends
-
 
 
 IMAGE_SECTION_HEADER struct

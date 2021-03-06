@@ -37,7 +37,7 @@ lbuffer equ $ - offset buffer
 
 main proc c
 
-    invoke printf, CStr("Mon32 loaded at %lX, esp=%lX",lf), ebx, esp
+    invoke printf, CStr("Mon32 loaded at %X, esp=%X",lf), ebx, esp
     call set_exception_handlers
     invoke printf, CStr("cs=%X ss=%X ds=%X es=%X fs=%X gs=%x",lf), cs, ss, ds, es, fs, gs
 nextcmd:
@@ -154,7 +154,7 @@ d_cmd proc
     mov ecx,8
 nextline:
     push ecx
-    invoke printf, CStr("%08lX: "), edi
+    invoke printf, CStr("%08X: "), edi
     mov cl,16
     .while cl
         push ecx
@@ -221,7 +221,7 @@ exception0D:
     mov edx,[esp+0]
     mov ecx,[esp+4]
     mov eax,[esp+8]
-    invoke printf, CStr(lf,"protection fault, errcode=%X cs:eip=%X:%lX",lf), edx, eax, ecx
+    invoke printf, CStr(lf,"protection fault, errcode=%X cs:eip=%X:%X",lf), edx, eax, ecx
     mov esp, dwEsp
     ret
 exception0E:
@@ -230,7 +230,7 @@ exception0E:
     mov ecx,[esp+4]
     mov eax,[esp+8]
     mov ebx,cr2
-    invoke printf, CStr(lf,"page fault, errcode=%X cs:eip=%X:%lX cr2=%lX",lf), edx, eax, ecx, ebx
+    invoke printf, CStr(lf,"page fault, errcode=%X cs:eip=%X:%X cr2=%X",lf), edx, eax, ecx, ebx
     mov esp, dwEsp
     ret
 
