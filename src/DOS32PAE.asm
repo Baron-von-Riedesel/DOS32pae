@@ -821,23 +821,27 @@ switch2pm proc
     mov cr4,eax
     mov eax,cs:pPageDir
     mov cr3,eax
-;--- enable protected-mode + paging
+;--- enable protected-mode + paging - also clear TS bit?
     mov eax,cr0
     or eax,80000001h
     mov cr0,eax
     ret
 switch2pm endp
 
-;--- call real-mode thru DPMI function ax=0x300
-;--- interrupts disabled
-;--- SP-> CS:EIP, then modified RMCS, without CS:IP;
-;--- variable dwCSIP contains real-mode CS:IP
+@popd macro x
+	db 66h
+	pop x
+endm
+
+;--- call real-mode thru DPMI functions ax=300h/301h.
+;--- interrupts disabled, stack switched to 16-bit.
+;--- SP-> CS:EIP, RMCS.
 
 call_rmode proc
 
     call switch2rm
-    pop dword ptr cs:retad
-    add sp,4   ;skip CS
+;    pop dword ptr cs:retad  ;not really needed. this proc is called by int31 only!
+;    add sp,4   ;skip CS (must be flat cs)
     popad
     pop cs:wFlags
     pop es
@@ -846,6 +850,11 @@ call_rmode proc
     pop gs
     pop cs:[dwCSIP]
     lss sp,[esp]
+
+	cmp ax,4B00h
+	jnz @F
+	int 3
+@@:
 
     push cs:wFlags   ;make an IRET frame
     call cs:[dwCSIP]
@@ -857,9 +866,27 @@ call_rmode proc
     pushf
     cli
     pushad
+    movzx esi,cs:[wStkBot+2]
+    shl esi,4
     movzx esp,sp
+    add esi,esp
     call switch2pm
-    jmp cs:[retad]
+    lss esp,fword ptr cs:[dwESP]
+
+    pushf
+    btr word ptr [esp],14	;clear NT in eflags
+    popf
+
+    @popd gs
+    @popd fs
+    @popd es
+    @popd ds
+    mov edi,[esp]
+    cld
+    mov ecx,42/2
+    rep movsw [edi],[esi]
+    popad
+    iretd
 
 call_rmode endp
 
@@ -1287,6 +1314,19 @@ error:
 int31_51816 endp
 endif
 
+;--- set/reset PIC from application program
+
+int31_a0016 proc far
+    mov dx,7008h
+    cmp bl,0	;restore to standard?
+    jz @F
+    mov dx,?SPIC shl 8 or ?MPIC
+@@:
+    call setpic
+exit:
+    iretd
+int31_a0016 endp
+
 if 0
 ;--- handle base relocations
 
@@ -1601,6 +1641,33 @@ if 1
     call WriteDW
 @@:
 endif
+if 1
+    cmp byte ptr [esp],0Ah
+    jnz @F
+    mov si, CStr32(" esp=")
+    mov ax,2
+    int 41h
+    lea eax,[esp+16]
+    call WriteDW
+    mov si, CStr32(" [esp]=")
+    mov ax,2
+    int 41h
+    mov eax,[esp+16]
+    call WriteDW
+    mov al,' '
+    call WriteChr
+    mov eax,[esp+20]
+    call WriteDW
+    mov al,' '
+    call WriteChr
+    mov eax,[esp+24]
+    call WriteDW
+    mov al,' '
+    call WriteChr
+    mov eax,[esp+28]
+    call WriteDW
+@@:
+endif
     mov dl,lf
     xor ax,ax
     int 41h
@@ -1703,6 +1770,8 @@ if ?I31518
     cmp ax,0518h	;allocate uncommitted memory 
     jz int31_518
 endif
+    cmp ax,0A00h	;vendor specifc API
+    jz int31_a00
 ret_with_carry:
     or byte ptr [esp+2*4],1 ;set carry flag
     iretd
@@ -1762,37 +1831,8 @@ endif
     mov ax,SEL_DATA16
     mov ss,eax
     mov esp,ebx         ;clear highword ESP, ESP is used inside call_rmode
-    assume ss:DGROUP
-
-    @call16 call_rmode
     assume es:nothing
-
-    movzx esi,[wStkBot+2]
-    shl esi,4
-    add esi,esp
-    lss esp,fword ptr [dwESP]
-    assume ss:nothing
-    pop gs
-    pop fs
-    pop es
-    pop ds
-
-    mov edi,[esp]
-    cld
-    movsd   ;copy 2Ah bytes back, don't copy CS:IP & SS:SP fields
-    movsd
-    movsd
-    movsd
-    movsd
-    movsd
-    movsd
-    movsd
-    movsd
-    movsd
-    movsw
-
-    popad
-    iretd
+    @jmp16 call_rmode
 
 int31_203:
     cmp bl,20h
@@ -1886,6 +1926,9 @@ int31_518:
 	add esp,34h
 	jmp ret_with_carry
 endif
+
+int31_a00:
+	@jmp16 int31_a0016
 
 int31 endp
 

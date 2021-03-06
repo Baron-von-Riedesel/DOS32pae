@@ -41,7 +41,18 @@
    - Alloc.asm; this sample shows how to use the memory "management" of
      the stub. It allocates a huge linear address space and backfills it
      with extended memory allocated thru XMS v3.5 (HimemSX).
+
    - Mon32.asm; this sample allows to display linear memory.
+
+   - FileAcc.asm; this sample uses extension module dosext.obj, that installs
+     int 21h extensions for file IO, so one can use int 21h directly for 
+     file access.
+
+   - HDAplayX.asm; this is actually a "real" application. It plays audio
+     files, accessing the HDA (High Definition Audio) controller directly.
+     Additionally, for storing the samples it uses XMS v3.5 to allocate
+     extended memory beyond the 4 GB barrier. So it will only run if HimemSX
+     is installed and the HDA controller can handle 64-bit addresses.
 
 
   4. Technical Details

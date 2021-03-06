@@ -13,7 +13,7 @@ all: $(ODIR) $(ODIR)\dosext.obj
 $(ODIR):
 	@mkdir $(ODIR)
 
-$(ODIR)\dosext.obj: dosext.asm Makefile
+$(ODIR)\dosext.obj: dosext.asm Makefile printf.inc
 	@jwasm -nologo -coff -Sg -Fl$* -Fo$* $(AOPTD) dosext.asm
 
 clean:
