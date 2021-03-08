@@ -317,7 +317,7 @@ start16 proc
     mov ax,3D00h
     int 21h
     pop ds
-    mov bp,CStr("cannot open file.")
+    mov bp,CStr("cannot open file")
     jc @error
     mov fhandle,ax
     mov bx,ax
@@ -328,14 +328,14 @@ start16 proc
     mov ah,3Fh
     int 21h
     cmp ax,cx
-    mov bp, CStr("invalid file format.")
+    mov bp, CStr("invalid file format")
     jnz @error
     movzx edx,dx
     cmp word ptr [edx].IMAGE_DOS_HEADER.e_magic,"ZM"
-    mov bp, CStr("invalid file format (no MZ header).")
+    mov bp, CStr("invalid file format (no MZ header)")
     jnz @error
     cmp word ptr [edx].IMAGE_DOS_HEADER.e_lfarlc,sizeof IMAGE_DOS_HEADER
-    mov bp, CStr("invalid file format (MZ header too small).")
+    mov bp, CStr("invalid file format (MZ header too small)")
     jc @error
     mov cx,word ptr [edx].IMAGE_DOS_HEADER.e_lfanew+2
     mov dx,word ptr [edx].IMAGE_DOS_HEADER.e_lfanew+0
@@ -346,29 +346,29 @@ start16 proc
     mov ah,3Fh
     int 21h
     cmp ax,cx
-    mov bp, CStr("invalid file format (cannot locate PE header).")
+    mov bp, CStr("invalid file format (cannot locate PE header)")
     jnz @error
 
     cmp dword ptr nthdr.Signature,"EP"
-    mov bp, CStr("invalid file format (no PE header).")
+    mov bp, CStr("invalid file format (no PE header)")
     jnz @error
     cmp nthdr.FileHeader.Machine,IMAGE_FILE_MACHINE_I386
-    mov bp, CStr("not a 32-bit binary.")
+    mov bp, CStr("not a 32-bit binary")
     jnz @error
 if 0
     test nthdr.FileHeader.Characteristics,IMAGE_FILE_RELOCS_STRIPPED
-    mov bp, CStr("relocations stripped, cannot load.")
+    mov bp, CStr("relocations stripped, cannot load")
     jnz @error
 endif
     cmp nthdr.OptionalHeader.Subsystem,IMAGE_SUBSYSTEM_NATIVE
-    mov bp, CStr("subsystem not native, cannot load.")
+    mov bp, CStr("subsystem not native, cannot load")
     jnz @error
     cmp nthdr.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT*sizeof IMAGE_DATA_DIRECTORY].Size_,0
-    mov bp, CStr("image contains imports, cannot load.")
+    mov bp, CStr("image contains imports, cannot load")
     jnz @error
     mov edx, nthdr.OptionalHeader.SizeOfImage
     add edx, dword ptr nthdr.OptionalHeader.SizeOfStackReserve
-    mov bp, CStr("image + stack > 4GB.")
+    mov bp, CStr("image + stack > 4GB")
     jc @error
     shr edx,12      ;convert to 4k pages
 
@@ -390,7 +390,7 @@ endif
     mov ah,89h
     call xmsaddr
     cmp ax,1
-    mov bp, CStr("XMS memory allocation failed.")
+    mov bp, CStr("XMS memory allocation failed")
     jnz @error
     mov xms1.wHdl,dx
     inc xmsidx
@@ -398,7 +398,7 @@ endif
     mov ah,0Ch      ;lock EMB 
     call xmsaddr
     cmp ax,1
-    mov bp, CStr("cannot lock EMB.")
+    mov bp, CStr("cannot lock EMB")
     jnz @error
     push dx
     push bx
@@ -441,7 +441,7 @@ endif
         mov ah,3Fh
         int 21h
         cmp ax,cx
-        mov bp, CStr("error reading section headers.")
+        mov bp, CStr("error reading section headers")
         jnz @error
         mov si,offset emm
         call copy2x
@@ -617,11 +617,11 @@ nextchar:
     int 21h
     jmp nextchar
 done:
-    mov dx,offset @newline
+    mov dx,offset @dotnewline
     mov ah,9
     int 21
     jmp @@exit
-@newline db 13,10,'$'
+@dotnewline db '.',13,10,'$'
 
 make_int_gates:
     lea eax, [ebx+edx]
@@ -1045,7 +1045,7 @@ copy2x proc
     pop bx
     pop ecx
     cmp ax,1
-    mov bp, CStr("error copying to extended memory.")
+    mov bp, CStr("error copying to extended memory")
     jnz @error
     add [si].EMM.dstofs,ecx
     ret
@@ -1090,7 +1090,7 @@ readsection proc
         mov ah,3Fh
         int 21h
         cmp ax,cx
-        mov bp, CStr("cannot read section data.")
+        mov bp, CStr("cannot read section data")
         jnz @error
         sub esi, ecx
         push si
@@ -1317,13 +1317,13 @@ endif
 ;--- set/reset PIC from application program
 
 int31_a0016 proc far
+    cli
     mov dx,7008h
     cmp bl,0	;restore to standard?
     jz @F
     mov dx,?SPIC shl 8 or ?MPIC
 @@:
     call setpic
-exit:
     iretd
 int31_a0016 endp
 

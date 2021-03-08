@@ -282,6 +282,7 @@ local rmcs:RMCS
 	jnz @B
 
 ;--- restore PIC to standard setting
+	cli
 	mov bl,0
 	mov ax,0A00h
 	int 31h

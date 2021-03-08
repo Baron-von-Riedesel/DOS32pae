@@ -106,7 +106,15 @@
   the IDT up to 0xffffffff may be used by the application.
 
 
-  5. License
+  5. How to build Dos32pae
+
+  The Dos32pae stub and all supporting modules (dosext.obj) are written in 
+  16-/32-bit Masm-style assembly language. The recommended tools to create the
+  binaries are JWasm and JWlink. The Makefiles supplied are in MS NMake style -
+  but if the tool isn't available, Open Watcom's wmake may do the job as well.
+
+
+  6. License
   
    The source is distributed under the MIT license. See file license.txt for
   details. It's written by Andreas Grech.
