@@ -50,6 +50,12 @@ else
 ?IDTADDR  equ ?PG0ADDR+1000h			;linear address of IDT
 endif
 
+;--- there's half a page free after the IDT (unlike in Dos64stb)
+;--- use the first half of this half-page for a "kernel stack" in the main TSS
+;--- and the second half for an alternative double-fault stack
+?KSTKADR  equ ?IDTADDR+0C00h
+?DFSTKADR equ ?IDTADDR+0FFCh
+
 ifdef __JWASM__
     option MZ:sizeof IMAGE_DOS_HEADER   ;set min size of MZ header if jwasm's -mz option is used
 endif
@@ -63,6 +69,39 @@ srcofs dd ?
 dsthdl dw ?
 dstofs dd ?
 EMM ends
+
+TSS struct  ;Standard 386 TSS
+_res	dw ?	;reserved
+Blink	dw ?
+ESP_r0	dd ?
+SS_r0	dd ?	;only the bottom word may be filled
+ESP_r1	dd ?
+SS_r1	dd ?	;only the bottom word may be filled
+ESP_r2	dd ?
+SS_r2	dd ?	;only the bottom word may be filled
+TSS_CR3 dd ?	;physical address page directory (=CR3)
+TSS_EIP	dd ?
+TSS_EFL	dd ?
+TSS_EAX	dd ?
+TSS_ECX	dd ?
+TSS_EDX	dd ?
+TSS_EBX	dd ?
+TSS_ESP	dd ?
+TSS_EBP	dd ?
+TSS_ESI	dd ?
+TSS_EDI	dd ?
+TSS_ES	dd ?
+TSS_CS	dd ?
+TSS_SS	dd ?
+TSS_DS	dd ?
+TSS_FS	dd ?
+TSS_GS	dd ?
+TSS_LDT	dd ?
+_res2	dw ?	;reserved
+IOPB	dw ?
+TSS ends
+
+sizeTSS equ sizeof TSS
 
 ;--- define a string
 CStr macro text:vararg
@@ -131,15 +170,20 @@ SEL_FLATCS equ 1*8
 SEL_FLATDS equ 2*8
 SEL_CODE16 equ 3*8
 SEL_DATA16 equ 4*8
+SEL_TSS    equ 5*8
+SEL_DFTSS  equ 6*8
 
 GDT dq 0                ; null descriptor
     dw -1,0,9A00h,00CFh ; flat code descriptor
     dw -1,0,9200h,00CFh ; flat data descriptor
     dw -1,0,9A00h,0000h ; 16-bit DGROUP code descriptor
     dw -1,0,9200h,0000h ; 16-bit DGROUP data descriptor
+    dw sizeTSS-1,offset maintss,8900h,0040h ; main TSS
+    dw sizeTSS-1,offset dflttss,8900h,0040h ; #DF TSS
+sizeGDT equ $-GDT
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 5*8-1            ; limit of GDT (size minus one)
+    dw sizeGDT-1        ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
 IDTR label fword        ; Interrupt Descriptor Table Register
     dw 256*8-1          ; limit of IDT (size minus one)
@@ -153,7 +197,7 @@ nullidt label fword
 
 xmsaddr dd ?	;seg:offs address of XMS entry
 PhysBase dd ?	;physical page image base
-pPageDir dd ?	;physical address page directory (=CR3)
+;pPageDir dd ?	;physical address page directory (=CR3)
 wStkBot dw ?,?	;real-mode stack bottom, offset & segment
 dwESP   dd ?	;protected-mode ESP
         dw SEL_FLATDS
@@ -221,6 +265,12 @@ endinttab equ $
 
     .data?
 
+;--- the main TSS will not be switched to, so it doesn't need the PDBR filled in
+maintss	TSS <>
+;--- double-fault task gate TSS - will be switched to for #DF!
+dflttss	TSS <>
+;--- since this TSS needs a PDBR set (for switching), just store our CR3 here.
+pPageDir equ dflttss.TSS_CR3
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>
@@ -242,9 +292,13 @@ start16 proc
     add dword ptr [GDTR+2], eax ; convert offset to linear address
     mov word ptr [GDT + SEL_CODE16 + 2], ax
     mov word ptr [GDT + SEL_DATA16 + 2], ax
+    add word ptr [GDT + SEL_TSS + 2], ax
+    add word ptr [GDT + SEL_DFTSS + 2], ax
     shr eax,16
     mov byte ptr [GDT + SEL_CODE16 + 4], al
     mov byte ptr [GDT + SEL_DATA16 + 4], al
+    mov byte ptr [GDT + SEL_TSS + 4], al
+    mov byte ptr [GDT + SEL_DFTSS + 4], al
 
     mov ax,ss
     mov dx,es
@@ -267,6 +321,24 @@ start16 proc
     mov sp,ax       ; make a TINY model, CS=SS=DS=ES
     mov wStkBot+0,ax
     mov wStkBot+2,ss
+
+;--- fill in the TSSes
+    xor eax,eax
+    mov cx,sizeTSS SHR 1 ; number of dwords in two TSSes
+    mov di,offset maintss
+    cld
+    rep stosd
+
+    mov [maintss.ESP_r0], ?KSTKADR
+    mov [maintss.SS_r0], SEL_FLATDS
+    mov [maintss.IOPB], 0DFFFh ; maximum possible to ensure NO IOPB
+
+    mov [dflttss.TSS_ESP], ?DFSTKADR
+    mov [dflttss.TSS_SS], SEL_FLATDS
+    mov [dflttss.TSS_DS], SEL_FLATDS
+    mov [dflttss.TSS_ES], SEL_FLATDS
+    mov [dflttss.TSS_CS], SEL_FLATCS
+    mov [maintss.IOPB], 0DFFFh ; maximum possible to ensure NO IOPB
 
     smsw ax
     test al,1
@@ -465,9 +537,16 @@ endif
 make_exc_gates:
     lea eax,[ebx+edx]
     stosw
-    mov ax,SEL_FLATCS
-    stosw
-    mov ax,8E00h
+    .if ecx == 24    ; 32-8 - i.e. this is the double-fault gate
+        mov [dflttss.TSS_EIP],eax
+        mov eax,SEL_DFTSS
+        stosw
+        mov ax,8500h ; Task Gate
+    .else
+        mov ax,SEL_FLATCS
+        stosw
+        mov ax,8E00h ; Interrupt Gate
+    .endif
     stosd
     add edx,4
     loop make_exc_gates
@@ -600,9 +679,14 @@ endif
     xor ax,ax
     mov fs,ax
     mov gs,ax
+    mov ax,SEL_TSS
+    ltr ax
     sti
 
 ;    call HandleRelocs
+    ; deliberate double-fault to test task gate
+    ;mov esp,1
+    ;pushad
 
     jmp cs:[retad]
 
@@ -1592,6 +1676,12 @@ excno = 0
     excno = excno+1
     endm
 @@:
+;--- did we get here via a task gate?
+    mov eax,cr0
+    btr eax,3   ; TS flag
+    mov cr0,eax ; reset TS before switching back to RM/VM86
+    setc ch     ; but remember if it was the case!
+
     push SEL_DATA16
     pop ds
     xor esi,esi
@@ -1599,6 +1689,14 @@ excno = 0
     mov ax,2
     int 41h
     pop eax
+    .if ch
+;--- now reorder the stack if indeed we did come from a task gate
+        pop ebx ; save errcode...
+        push ds:[maintss.TSS_EFL]
+        push ds:[maintss.TSS_CS]
+        push ds:[maintss.TSS_EIP]
+        push ebx
+    .endif
     push eax
     call WriteB
 if 1
@@ -1643,7 +1741,9 @@ if 1
 endif
 if 1
     cmp byte ptr [esp],0Ah
-    jnz @F
+    jnz @F ; TSS error
+    test ch,ch
+    jnz @F ; or task-switched
     mov si, CStr32(" esp=")
     mov ax,2
     int 41h
@@ -1671,6 +1771,12 @@ endif
     mov dl,lf
     xor ax,ax
     int 41h
+    .if ch
+;--- clear NT before we die, if we came from a task gate
+        pushf
+        btr word ptr [esp],14
+        popf
+    .endif
     mov ax,4cffh
     int 21h
     align 4
