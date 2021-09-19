@@ -218,6 +218,12 @@ endif
 if ?SPIC ne 70h
 bPICS   db ?
 endif
+;--- the main TSS will not be switched to, so it doesn't need the PDBR filled in
+maintss	TSS <0,0,?KSTKADR,SEL_FLATDS,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
+;--- double-fault task gate TSS - will be switched to for #DF!
+dflttss	TSS <0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,?DFSTKADR,0,0,0,SEL_FLATDS,SEL_FLATCS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
+;--- since this TSS needs a PDBR set (for switching), just store our CR3 here.
+pPageDir equ dflttss.TSS_CR3
 
 ;--- don't move the saved IVT vectors to .data?
 ;--- this leaves the full _BSS and CONST space
@@ -266,12 +272,6 @@ endinttab equ $
 
     .data?
 
-;--- the main TSS will not be switched to, so it doesn't need the PDBR filled in
-maintss	TSS <>
-;--- double-fault task gate TSS - will be switched to for #DF!
-dflttss	TSS <>
-;--- since this TSS needs a PDBR set (for switching), just store our CR3 here.
-pPageDir equ dflttss.TSS_CR3
 nthdr   IMAGE_NT_HEADERS <>
 sechdr  IMAGE_SECTION_HEADER <>
 emm     EMM <>
@@ -322,24 +322,6 @@ start16 proc
     mov sp,ax       ; make a TINY model, CS=SS=DS=ES
     mov wStkBot+0,ax
     mov wStkBot+2,ss
-
-;--- fill in the TSSes
-    xor eax,eax
-    mov cx,sizeTSS SHR 1 ; number of dwords in two TSSes
-    mov di,offset maintss
-    cld
-    rep stosd
-
-    mov [maintss.ESP_r0], ?KSTKADR
-    mov [maintss.SS_r0], SEL_FLATDS
-    mov [maintss.IOPB], 0DFFFh ; maximum possible to ensure NO IOPB
-
-    mov [dflttss.TSS_ESP], ?DFSTKADR
-    mov [dflttss.TSS_SS], SEL_FLATDS
-    mov [dflttss.TSS_DS], SEL_FLATDS
-    mov [dflttss.TSS_ES], SEL_FLATDS
-    mov [dflttss.TSS_CS], SEL_FLATCS
-    mov [maintss.IOPB], 0DFFFh ; maximum possible to ensure NO IOPB
 
     smsw ax
     test al,1
@@ -1341,7 +1323,7 @@ local handle:word
     call ClearRegion    ;clear region edi, size esi kb
     pop eax
     add eax,1000h-1
-    and ax,0F000h
+    ;and ax,0F000h
     shr eax,12
     mov esi, dwSize
     add esi, 1000h-1
