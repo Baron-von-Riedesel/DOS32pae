@@ -41,6 +41,7 @@ DGROUP group _TEXT
 ?I31504   equ 1			;1=support int 31h, ax=504h (uncommitted memory only)
 ?I31518   equ 1			;1=support int 31h, ax=518h map physical memory
 ?DIRVIO   equ 1			;1=direct video output for int 41h, 0=use BIOS
+?I31SETTG equ 1			;1=allow int 31h to alter task gate CS:EIP, 0=int 31h resets exception 8 to interrupt gate
 
 ife ?CONVBEG
 ?PG0ADDR  equ 0
@@ -1945,6 +1946,21 @@ int31_203:
     jae ret_with_carry
 int31_205:
     push eax
+if ?I31SETTG
+    .if bl==8
+        push ds
+        push SEL_DATA16
+        pop ds
+        assume ds:DGROUP
+        mov [dflttss.TSS_EIP],edx
+        mov word ptr [dflttss.TSS_CS],cx
+;--- handler may IRET with NT, in which case we need the right PDBR in main TSS
+        mov eax,cr3
+        mov [maintss.TSS_CR3],eax
+        pop ds
+        assume ds:nothing
+    .else
+endif
     push edi
 
     movzx edi,bl
@@ -1956,27 +1972,47 @@ int31_205:
     stosw           ;lowword offset
     mov ax,cx
     stosw           ;CS
-if 1
+if ?I31SETTG
     add edi,2
 else
+;--- use these two lines to ensure #DF becomes an interrupt gate, if so desired
     mov ax,8E00h
     stosw
 endif
     shr eax,16
     stosw           ;hiword offset
+
     pop edi
+if ?I31SETTG
+    .endif
+endif
     pop eax
     iretd
 int31_202:	;get exception vector BL in CX:EDX
     cmp bl,20h
     jae ret_with_carry
 int31_204:	;get interrupt vector BL in CX:EDX
+if ?I31SETTG
+    .if bl==8
+        push ds
+        push SEL_DATA16
+        pop ds
+        assume ds:DGROUP
+        mov edx,[dflttss.TSS_EIP]
+        mov ecx,[dflttss.TSS_CS]
+        pop ds
+        assume ds:nothing
+    .else
+endif
     movzx ecx,bl
     lea ecx,[ecx*8+?IDTADDR]
     mov dx,[ecx+6]
     shl edx,16
     mov dx,[ecx+0]
     mov cx,[ecx+2]
+if ?I31SETTG
+    .endif
+endif
     iretd
 
 if ?I31504
