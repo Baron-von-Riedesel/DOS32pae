@@ -173,6 +173,7 @@ SEL_CODE16 equ 3*8
 SEL_DATA16 equ 4*8
 SEL_TSS    equ 5*8
 SEL_DFTSS  equ 6*8
+SEL_VCPICS equ 7*8
 
 GDT dq 0                ; null descriptor
     dw -1,0,9A00h,00CFh ; flat code descriptor
@@ -182,6 +183,10 @@ GDT dq 0                ; null descriptor
     dw sizeTSS-1,offset maintss,8900h,0040h ; main TSS
     dw sizeTSS-1,offset dflttss,8900h,0040h ; #DF TSS
 sizeGDT equ $-GDT
+    dq 3 dup(?)
+sizeGDT_VCPI equ $-GDT
+
+inVCPImode equ (word ptr cs:[GDTR] == sizeGDT_VCPI-1)
 
 GDTR label fword        ; Global Descriptors Table Register
     dw sizeGDT-1        ; limit of GDT (size minus one)
@@ -195,6 +200,13 @@ nullidt label fword
     dd 0
 
     .data
+
+;--- the main TSS will not be switched to, so it doesn't need the PDBR filled in
+maintss	TSS <0,0,?KSTKADR,SEL_FLATDS,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
+;--- double-fault task gate TSS - will be switched to for #DF!
+dflttss	TSS <0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,?DFSTKADR,0,0,0,SEL_FLATDS,SEL_FLATCS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
+;--- since this TSS needs a PDBR set (for switching), just store our CR3 here.
+pPageDir equ dflttss.TSS_CR3
 
 xmsaddr dd ?	;seg:offs address of XMS entry
 PhysBase dd ?	;physical page image base
@@ -218,12 +230,12 @@ endif
 if ?SPIC ne 70h
 bPICS   db ?
 endif
-;--- the main TSS will not be switched to, so it doesn't need the PDBR filled in
-maintss	TSS <0,0,?KSTKADR,SEL_FLATDS,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
-;--- double-fault task gate TSS - will be switched to for #DF!
-dflttss	TSS <0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,?DFSTKADR,0,0,0,SEL_FLATDS,SEL_FLATCS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,SEL_FLATDS,0,0,0DFFFh> ; max possible IOPB offset to ensure NO IOPB!
-;--- since this TSS needs a PDBR set (for switching), just store our CR3 here.
-pPageDir equ dflttss.TSS_CR3
+PTbufseg dw -1  ;low mem buffer for page tables if Unreal Mode unavailable
+emshdl	dw -1
+maxV86pg dd ?
+vcpiadr	label fword
+	dd ?
+	dw SEL_VCPICS
 
 ;--- don't move the saved IVT vectors to .data?
 ;--- this leaves the full _BSS and CONST space
@@ -236,6 +248,18 @@ if ?SPIC ne 70h
 storedIntS label dword
         dd 8 dup (?)
 endif
+
+;--- persistent EMM block used for setting up page tables without Unreal
+emm3    EMM <>
+
+;--- VCPI control structure
+vcpiCR3	dd ?		; not the PAE CR3, a 32-bit one!
+vcpiGDT dd offset GDTR
+vcpiIDT	dd offset IDTR
+vcpiLDT dw 0
+vcpiTSS dw SEL_TSS
+vcpiEIP dd ?
+vcpiCS	dw SEL_CODE16
 
 _DATA1 segment word "DATA"
 DGROUP group _DATA1
@@ -291,6 +315,8 @@ start16 proc
     mov ds,ax
     shl eax,4
     add dword ptr [GDTR+2], eax ; convert offset to linear address
+    add [vcpiGDT], eax		; convert offset to linear address
+    add [vcpiIDT], eax		; convert offset to linear address
     mov word ptr [GDT + SEL_CODE16 + 2], ax
     mov word ptr [GDT + SEL_DATA16 + 2], ax
     add word ptr [GDT + SEL_TSS + 2], ax
@@ -326,7 +352,16 @@ start16 proc
     smsw ax
     test al,1
     jz @F
-    @fatexit "Mode is V86. Need REAL mode to switch to PAE paging mode!"
+;--- not in RM - therefore can't use Unreal...
+    xor ax,ax
+    mov [PTbufseg],ax
+;--- need VCPI to take control, so check for that...
+    mov ah,0DEh
+    int 67h
+    mov word ptr [GDTR],sizeGDT_VCPI-1 ; 3 extra GDT entries needed!
+    test ah,ah
+    jz @F
+    @fatexit "Mode is V86 and no VCPI. Need REAL mode to switch to PAE paging mode!"
 @@:
     xor edx,edx
     mov eax,1   ; test if pae paging is supported
@@ -350,6 +385,86 @@ start16 proc
 
     mov ah,5        ;local enable A20
     call xmsaddr
+
+;--- do VCPI setup work if necessary before transferring stuff into XMS mem
+
+    .if inVCPImode
+;--- allocate two EMS pages (i.e. eight 4k pages)
+;--- first EMS page for temporary storage of PDPT/PDs/PTs before copying to XM
+;--- second one for VCPI PT and VCPI PD (latter with only one entry)
+;--- lots of space "wasted" here (it could all be compressed into one EMS page)
+;--- but this strategy is reusable for Dos64Stb (where four-level paging makes
+;--- better use of the first EMS page)
+        mov ebx,2
+        mov ah,43h ; allocate pages
+        int 67h
+        test ah,ah
+        jz @F
+        @fatexit "EMS allocation failed for page table buffer."
+@@:
+        mov [emshdl],dx
+        mov ah,41h ; get page frame address
+        int 67h
+        test ah,ah
+        jz @F
+        @fatexit "EMS page frame inaccessible."
+@@:
+        mov [PTbufseg],bx
+        mov ax,4400h ; map handle page, to zeroth "physical" page
+        xor bx,bx    ; map the first EMS page of this handle
+        int 67h
+        test ah,ah
+        jz @F
+        @fatexit "Unable to map EMS page."
+@@:
+        mov ax,4401h ; map handle page, to first "physical" page
+        mov bx,1     ; map the second EMS page of this handle
+        int 67h
+        test ah,ah
+        jz @F
+        @fatexit "Unable to map EMS page."
+@@:
+;--- clear the EMS pages
+        mov es,[PTbufseg]
+        xor di,di
+        mov cx,2000h
+        xor eax,eax
+        cld
+        rep stosd
+
+        mov ax,0DE01h                  ; get protected mode interface
+        mov edi,4000h                  ; second EMS page in the page frame
+        mov si,offset GDT+SEL_VCPICS   ; DS:SI points to descriptors
+        int 67h
+        mov dword ptr [vcpiadr],ebx
+        sub edi,4000h
+        mov ecx,edi
+        shr ecx,2                      ; convert to page count
+        mov [maxV86pg],ecx
+;--- clear bits 9-11 of all the PT entries, as per the VCPI standard
+@@:
+        and byte ptr es:[ecx*4-3],0F1h ; byte index n*4 - 3, where n > 0
+        loop @B
+
+;--- get the physical addx of the PT we just filled in
+        mov di,[PTbufseg]
+        add di,400h     ; base of segment containing VCPI PT
+        ;shl edi,4      ; paragraphs to bytes
+        ;shr edi,12     ; bytes to pages
+        ;shl edi,2      ; page count to PT index
+        shr di,6
+        add di,4000h    ; again, get page on which PT is actually located
+        mov ebx,[es:di] ; physical addx of VCPI PT
+        add di,4
+        mov ecx,[es:di] ; physical addx of empty PD (very next page)
+        and cx,0F000h   ; get just the addx, no attrs
+        mov di,5000h
+        mov [es:di],ebx ; put the PT addx at the beginning of the PD
+        mov vcpiCR3,ecx ; address of the PD for VCPI switch
+
+        push ds
+        pop es
+    .endif
 
     push es
     mov ah,51h
@@ -458,8 +573,11 @@ endif
     push dx
     push bx
     pop edi
+    mov xms1.dwAddr,edi
     push edi
 	call ClearRegion
+    mov bp, CStr("cannot clear EMB")
+    jc @error
 
 ;--- align to page boundary
     pop eax
@@ -638,6 +756,7 @@ if ?SPIC ne 70h
 endif
     @dprintf "start16: switching to pm"
 
+    int 3
     cli
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
@@ -647,11 +766,11 @@ endif
 ;--- esi = value of image's EIP
 ;--- ebx = image start linear address
 
-    mov ebx,nthdr.OptionalHeader.ImageBase
-    mov ecx,nthdr.OptionalHeader.SizeOfStackReserve
-    add ecx,nthdr.OptionalHeader.SizeOfImage
+    mov ebx,cs:nthdr.OptionalHeader.ImageBase
+    mov ecx,cs:nthdr.OptionalHeader.SizeOfStackReserve
+    add ecx,cs:nthdr.OptionalHeader.SizeOfImage
     add ecx,ebx
-    mov esi,nthdr.OptionalHeader.AddressOfEntryPoint
+    mov esi,cs:nthdr.OptionalHeader.AddressOfEntryPoint
     add esi,ebx
 
     mov ax,SEL_FLATDS
@@ -662,8 +781,10 @@ endif
     xor ax,ax
     mov fs,ax
     mov gs,ax
-    mov ax,SEL_TSS
-    ltr ax
+    .if !inVCPImode
+        mov ax,SEL_TSS
+        ltr ax
+    .endif
     sti
 
 ;    call HandleRelocs
@@ -707,12 +828,36 @@ start16 endp
 ClearRegion proc
 ;--- clear the whole block
     call EnableUnreal
+    jc @F
     mov ecx,esi
     shl ecx,8  ;kb to dword
-    xor eax,eax
+    xor eax,eax;clears CF
     @rep stosd
     push ds
     pop es
+    ret
+
+@@:
+;--- no Unreal, need to use fiddly XMS helpers instead...
+    push esi
+    mov ecx,esi
+
+    call FindXmsHdl
+    mov [emm3.srchdl],0
+    mov si,[PTbufseg]
+    mov word ptr [emm3.srcofs],6000h ; unused (blank) 4k page...
+    mov word ptr [emm3.srcofs+2],si
+
+    mov si,offset emm3
+@@:
+    push ecx
+    mov ecx,400h
+    call copy2x
+    pop ecx
+    jc @F
+    loop @B
+@@:
+    pop esi
     ret
 ClearRegion endp
 
@@ -721,10 +866,12 @@ ClearRegion endp
 ;--- pages: no of pages to map
 ;--- physpage: start physical memory pages used for paging (physical address >> 12)
 
-CreateAddrSpace proc stdcall uses es esi linaddr:dword, pages:dword, physpage:dword
+CreateAddrSpace proc stdcall uses es esi di linaddr:dword, pages:dword, physpage:dword
 
     @dprintf "CreateAddrSpace(%lX, %lX, %lX) enter", linaddr, pages, physpage
     call EnableUnreal
+    setc dh
+    movzx di,dh ; Use DI to track if Unreal is unavailable
     mov esi, physpage
     .while pages
         mov eax,linaddr
@@ -742,6 +889,15 @@ CreateAddrSpace proc stdcall uses es esi linaddr:dword, pages:dword, physpage:dw
         mov cx,2
         mov ebx,pPageDir
 @@:
+        .if di
+            call CopyInTable
+            jnc copytabok
+            shl cx,2
+            add sp,cx
+            stc
+            jmp exit
+copytabok:
+        .endif
         add ebx,eax
         mov edx,es:[ebx]
         .if (edx == 0)             ;does PDPTE/PDE exist?
@@ -765,6 +921,10 @@ CreateAddrSpace proc stdcall uses es esi linaddr:dword, pages:dword, physpage:dw
 ;       and bx,0FC00h
         and bx,0F000h
         loop @B
+        .if di
+            call CopyInTable
+            jc exit
+        .endif
         add ebx,eax
         test dword ptr es:[ebx],1
         stc
@@ -772,6 +932,20 @@ CreateAddrSpace proc stdcall uses es esi linaddr:dword, pages:dword, physpage:dw
         add linaddr,1000h
         dec pages
     .endw
+    .if di
+;--- swap out the page tables
+        mov cx,3 ; loop three times...
+        mov es,[PTbufseg]
+        mov di,2030h
+@@:
+        mov ebx,[es:di]
+        dec cx   ; ... but do so with cx = 2,1,0!
+        call CopyOutTable
+        jc exit
+        inc cx
+        sub di,8
+        loop @B
+    .endif
     mov eax,esi
     sub eax,physpage
     @dprintf "CreateAddrSpace() ok, esi=%lX, eax=%lX", esi, eax
@@ -788,6 +962,99 @@ endif
 
 CreateAddrSpace endp
 
+;--- copy page table from XMS to EMS/convmem so we can work on it
+;--- EBX = physical addx of table
+;--- CX  = paging level
+;--- sets ES:EBX to pointer to copied-in page table
+CopyInTable proc
+    push eax
+    push edi
+
+    mov es,[PTbufseg]
+    mov di,2020h shr 3 ; list of currently swapped-in addxs is after PT+PD+PDPT
+    add di,cx          ; the CXth entry on the list
+    shl di,3
+
+    cmp [es:di],ebx    ; is the physical addx the same one we've swapped in?
+    setz al
+    xchg [es:di],ebx
+    .if (al == 0) && ebx
+;--- if we're swapping in a new table, and there's one there now, swap it out
+        call CopyOutTable
+        jc @F
+    .endif
+
+    movzx ebx,cx
+    shl bx,12          ; nth paging level corresponds to nth 4k page in buffer
+
+    .if al == 0
+        mov edi,[es:di]
+        call FindXmsHdl
+;--- FindXmsHdl filled in the destination, but here it's actually the source!
+        xor di,di
+        xchg di,[emm3.dsthdl] ; make destination handle zero (low mem)
+        mov [emm3.srchdl],di
+        mov edi,[emm3.dstofs]
+        mov [emm3.srcofs],edi
+;--- our destination is in the buffer segment
+;--- TODO: allocate buffer segment in convmem if it's unset (i.e. zero)
+;--- (currently never the case since we have already allocated it in EMS)
+        mov word ptr [emm3.dstofs+2],es
+        mov word ptr [emm3.dstofs],bx
+
+        push ecx
+        .if cx == 2
+            mov cx,20h   ; PDPT is only 32 bytes
+        .else
+            mov cx,1000h ; copy full page
+        .endif
+
+        push esi
+        mov si,offset emm3
+        call copy2x
+
+        pop esi
+        pop ecx
+    .endif
+@@:
+    pop edi
+    pop eax
+    ret
+CopyInTable endp
+
+;--- copy page table from EMS/convmem back out to XMS
+;--- EBX = physical addx of table
+;--- CX  = paging level
+CopyOutTable proc
+    push eax
+    push edi
+    mov edi,ebx
+    call FindXmsHdl
+;--- FindXmsHdl filled in the destination; our source is in the buffer segment
+    mov [emm3.srchdl],0 ; low mem
+    mov di,[PTbufseg]
+    mov word ptr [emm3.srcofs+2],di
+
+    push ecx
+    shl cx,12 ; nth paging level corresponds to nth 4k page in buffer
+    mov word ptr [emm3.srcofs],cx
+    .if cx == 2000h
+        mov cx,20h   ; PDPTE is only 32 bytes
+    .else
+        mov cx,1000h ; copy full page
+    .endif
+
+    push esi
+    mov si,offset emm3
+    call copy2x
+
+    pop esi
+    pop ecx
+    pop edi
+    pop eax
+    ret
+CopyOutTable endp
+
 ;--- map physical pages in existing address space
 ;--- linaddr: start linear address space 
 ;--- pages: no of pages to map
@@ -798,6 +1065,8 @@ MapPages proc stdcall uses es linaddr:dword, pages:dword, physpage:dword
 
     @dprintf "MapPages(%lX, %lX, %lX) enter", linaddr, pages, physpage
     call EnableUnreal
+    setc dh
+    movzx di,dh ; Use DI to track if Unreal is unavailable
     .while pages
         mov eax,linaddr
         shr eax,9
@@ -814,24 +1083,60 @@ MapPages proc stdcall uses es linaddr:dword, pages:dword, physpage:dword
         mov ebx,pPageDir
         and eax,0ff8h
 @@:
+        .if di
+            call CopyInTable
+            jnc copytabok
+            shl cx,2
+            add sp,cx
+            stc
+            jmp exit
+copytabok:
+        .endif
         add ebx,eax
         pop eax
         and eax,0ff8h
         mov ebx,es:[ebx]
         and bx,0F000h
         loop @B
+        .if di
+            call CopyInTable
+            jc exit
+        .endif
         add ebx,eax
         mov edx,physpage
-        sub eax,eax
-        shld eax,edx,12
-        shl edx,12
-        or dl,11b
+        .if inVCPImode && (edx < cs:[maxV86pg])
+            push es
+            mov es,cs:[PTbufseg]
+            add edx,1000h ; VCPI PT @ ES:4000h
+            mov edx,es:[edx*4]
+            xor eax,eax
+            pop es
+        .else
+            sub eax,eax
+            shld eax,edx,12
+            shl edx,12
+            or dl,11b
+        .endif
         mov es:[ebx+0],edx
         mov es:[ebx+4],eax
         inc physpage
         add linaddr,1000h
         dec pages
     .endw
+    .if di
+;--- swap out the page tables
+        mov cx,3 ; loop three times...
+        mov es,[PTbufseg]
+        mov di,2030h
+@@:
+        mov ebx,[es:di]
+        dec cx   ; ... but do so with cx = 2,1,0!
+        call CopyOutTable
+        jc exit
+        inc cx
+        sub di,8
+        loop @B
+    .endif
     clc
 exit:
     ret
@@ -839,6 +1144,11 @@ exit:
 MapPages endp
 
 EnableUnreal proc
+    .if [PTbufseg] != -1
+;--- if a PT buffer is in use, it means Unreal is unavailable
+        stc
+        ret
+    .endif
     cli
     lgdt [GDTR]
     mov eax,cr0
@@ -853,10 +1163,44 @@ EnableUnreal proc
     jmp @F
 @@:
     sti
-    xor ax,ax
+    xor ax,ax ; clears carry
     mov es,ax
     ret
 EnableUnreal endp
+
+FindXmsHdl proc
+;--- take physical addx in edi and fill in emm3 struct with the corresponding
+;--- XMS handle and offset (or best guess thereat)
+    push ebx
+    push ebp
+    push si
+
+    xor ebp,ebp
+    not ebp     ; track the smallest offset we find - so begin with FFFFFFFFh
+    mov si,xmsidx
+    shl si,3	;sizeof MEMBLK = 8
+    .while si
+        mov ebx,[si+xmshdltab-sizeof MEMBLK].MEMBLK.dwAddr
+        neg ebx
+        add ebx,edi
+        jnc @F  ; edi would be a negative offset in this block, so not right
+        cmp ebx,ebp
+        jnb @F  ; not the smallest offset we've found
+;--- this is the handle with the smallest offset for edi that we've found,
+;--- so it's a candidate for the handle that contains edi
+        mov ebp,ebx
+        mov [emm3.dstofs],ebx
+        mov bx,[si+xmshdltab-sizeof MEMBLK].MEMBLK.wHdl
+        mov [emm3.dsthdl],bx
+@@:
+        sub si,sizeof MEMBLK
+    .endw
+
+    pop si
+    pop ebp
+    pop ebx
+    ret
+FindXmsHdl endp
 
 
 ;--- switch to real-mode
@@ -872,17 +1216,73 @@ switch2rm proc
     jmp far16 ptr @F
 @@:
     mov eax,cr4
-    and al,0DFh         ; reset bit 5, disable PAE paging
+    and al,0DFh             ; reset bit 5, disable PAE paging
     mov cr4,eax
-    lidt cs:[nullidt]   ; IDTR=real-mode compatible values
+
+    .if inVCPImode
+        mov eax,cs:[vcpiCR3]
+        mov cr3,eax
+        mov eax,cr0
+        or eax,80000001h    ; re-enable paging with VCPI-provided settings
+        mov cr0,eax
+        jmp @F
+@@:
+        push SEL_FLATDS
+        pop ds
+
+        push ebx
+        mov ebx,esp
+
+;--- setup segments - make a tiny model...
+        movzx eax,cs:[wStkBot+2]
+        push eax ; GS
+        push eax ; FS
+        push eax ; DS
+        push eax ; ES
+        push eax ; SS
+        push ebx ; ESP
+        sub esp,4 ; EFLAGS
+        push eax ; CS
+        pushd offset @F ; EIP
+
+        mov ax, 0DE0Ch ; switch to VM86
+        call cs:vcpiadr
+@@:
+        pop ebx
+    .else
+        lidt cs:[nullidt]   ; IDTR=real-mode compatible values
+    .endif
     ret
 switch2rm endp
 
 ;--- switch to protected-mode
 
 switch2pm proc
-    lgdt cs:[GDTR]
-    @lidt cs:[IDTR]
+    .if inVCPImode
+        mov ax,0DE0Ch
+        push esi
+        push cs:[wStkBot]
+        mov cs:[wStkBot],sp
+        mov esi,cs
+        shl esi,4
+        add esi,offset vcpiCR3
+        mov cs:[vcpiEIP],offset @F
+        int 67h
+@@:
+        mov ax, SEL_DATA16
+        ;mov ds, ax
+        ;mov es, ax
+        mov ss, ax
+        mov sp, ss:[wStkBot]
+        pop ss:[wStkBot]
+        pop esi
+        mov eax,cr0
+        and eax,7FFFFFFFh ; turn off paging while we reconfigure it
+        mov cr0,eax
+    .else
+        lgdt cs:[GDTR]
+        @lidt cs:[IDTR]
+    .endif
     mov eax,cr4
     or ax,220h          ; enable PAE (bit 5) and OSFXSR (bit 9)
     mov cr4,eax
@@ -1082,6 +1482,12 @@ backtoreal proc
     mov ah,3Eh
     int 21h
 @@:
+    mov dx,emshdl
+    cmp dx,-1
+    jz @F
+    mov ah,45h          ;deallocate pages
+    int 67h
+@@:
     mov si,xmsidx
     shl si,3	;sizeof MEMBLK = 8
     .while si
@@ -1111,9 +1517,17 @@ copy2x proc
     call xmsaddr
     pop bx
     pop ecx
-    cmp ax,1
-    mov bp, CStr("error copying to extended memory")
-    jnz @error
+    .if si != offset emm3 ; HACK: Can't spoil bp from inside CopyInTable
+        cmp ax,1
+        mov bp, CStr("error copying to extended memory")
+        jnz @error
+    .else
+        cmp ax,1
+        stc
+        jnz @F
+        clc
+@@:
+    .endif
     add [si].EMM.dstofs,ecx
     ret
 copy2x endp
@@ -1321,6 +1735,7 @@ local handle:word
     push edi
     @dprintf "int31_504() clear region edi=%lX, esi=%lX kB", edi, esi
     call ClearRegion    ;clear region edi, size esi kb
+    jc error
     pop eax
     add eax,1000h-1
     ;and ax,0F000h
