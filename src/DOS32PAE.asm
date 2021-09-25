@@ -230,9 +230,12 @@ endif
 if ?SPIC ne 70h
 bPICS   db ?
 endif
+vPIC	label word
+vPICM	db 8    ;saved master PIC vector
+vPICS	db 70h  ;saved slave PIC vector
 PTbufseg dw -1  ;low mem buffer for page tables if Unreal Mode unavailable
 emshdl	dw -1
-maxV86pg dd ?
+V86pgs  dd ?
 vcpiadr	label fword
 	dd ?
 	dw SEL_VCPICS
@@ -440,7 +443,7 @@ start16 proc
         sub edi,4000h
         mov ecx,edi
         shr ecx,2                      ; convert to page count
-        mov [maxV86pg],ecx
+        mov [V86pgs],ecx
 ;--- clear bits 9-11 of all the PT entries, as per the VCPI standard
 @@:
         and byte ptr es:[ecx*4-3],0F1h ; byte index n*4 - 3, where n > 0
@@ -573,9 +576,15 @@ endif
     push dx
     push bx
     pop edi
-    mov xms1.dwAddr,edi
+    .if ([PTbufseg] != 0) && ([PTbufseg] != -1)
+        mov es,[PTbufseg]
+;--- store EMB bases in otherwise-unused EMS page
+        mov [es:6400h],edi
+        push ds
+        pop es
+    .endif
     push edi
-	call ClearRegion
+    call ClearRegion
     mov bp, CStr("cannot clear EMB")
     jc @error
 
@@ -600,7 +609,7 @@ endif
     mov word ptr emm.srcofs+0, offset nthdr
     mov word ptr emm.srcofs+2, ds
     mov si,offset emm
-    call copy2x
+    call copy2x_ordie
 
 ;--- read image sections and copy them to extended memory
 
@@ -617,7 +626,7 @@ endif
         mov bp, CStr("error reading section headers")
         jnz @error
         mov si,offset emm
-        call copy2x
+        call copy2x_ordie
         call readsection
         pop cx
         dec cx
@@ -628,6 +637,19 @@ endif
     mov fhandle,-1
 
 ;--- create IDT
+
+    .if inVCPImode
+;--- check if anyone has reprogrammed the PIC, and setup our IDT accordingly
+        mov ax,0DE0Ah
+        int 67h
+        mov vPICM,bl
+        mov vPICS,cl
+        .if vPIC != 7008h
+            mov [inttab.intno],bl                 ; clock vector (IRQ0)
+            inc bl
+            mov [inttab.intno+sizeof intstruc],bl ; kbd vector (IRQ1)
+        .endif
+    .endif
 
     mov ebx, _TEXT32
     shl ebx, 4
@@ -696,7 +718,7 @@ make_exc_gates:
 
     mov si,offset emm
     mov cx,800h
-    call copy2x
+    call copy2x_ordie
 
     add sp,4096
 
@@ -745,6 +767,8 @@ endif
     mov ax,2523h
     int 21h
 
+    cmp vPIC,7008h
+    jne @F
     call setints
 if ?MPIC ne 8
     in al,21h
@@ -754,12 +778,16 @@ if ?SPIC ne 70h
     in al,0A1h
     mov bPICS,al
 endif
+
+@@:
     @dprintf "start16: switching to pm"
 
-    int 3
     cli
+    cmp vPIC,7008h
+    jne @F
     mov dx,?SPIC shl 8 or ?MPIC
     call setpic
+@@:
     call switch2pm
 
 ;--- now load:
@@ -869,6 +897,7 @@ ClearRegion endp
 CreateAddrSpace proc stdcall uses es esi di linaddr:dword, pages:dword, physpage:dword
 
     @dprintf "CreateAddrSpace(%lX, %lX, %lX) enter", linaddr, pages, physpage
+    int 3
     call EnableUnreal
     setc dh
     movzx di,dh ; Use DI to track if Unreal is unavailable
@@ -1064,6 +1093,7 @@ CopyOutTable endp
 MapPages proc stdcall uses es linaddr:dword, pages:dword, physpage:dword
 
     @dprintf "MapPages(%lX, %lX, %lX) enter", linaddr, pages, physpage
+    int 3
     call EnableUnreal
     setc dh
     movzx di,dh ; Use DI to track if Unreal is unavailable
@@ -1104,7 +1134,7 @@ copytabok:
         .endif
         add ebx,eax
         mov edx,physpage
-        .if inVCPImode && (edx < cs:[maxV86pg])
+        .if inVCPImode && (edx < cs:[V86pgs])
             push es
             mov es,cs:[PTbufseg]
             add edx,1000h ; VCPI PT @ ES:4000h
@@ -1174,13 +1204,16 @@ FindXmsHdl proc
     push ebx
     push ebp
     push si
+    push es
+    mov es,[PTbufseg]
 
     xor ebp,ebp
     not ebp     ; track the smallest offset we find - so begin with FFFFFFFFh
     mov si,xmsidx
     shl si,3	;sizeof MEMBLK = 8
     .while si
-        mov ebx,[si+xmshdltab-sizeof MEMBLK].MEMBLK.dwAddr
+;--- get EMB bases from EMS page
+        mov ebx,[es:6400h-8+si]
         neg ebx
         add ebx,edi
         jnc @F  ; edi would be a negative offset in this block, so not right
@@ -1192,10 +1225,12 @@ FindXmsHdl proc
         mov [emm3.dstofs],ebx
         mov bx,[si+xmshdltab-sizeof MEMBLK].MEMBLK.wHdl
         mov [emm3.dsthdl],bx
+        ;@dprintf "FindXmsHdl(): (%d/8)th hdl %X candidate for addr %lX (offs=%lX)", si, bx, edi, ebp
 @@:
         sub si,sizeof MEMBLK
     .endw
 
+    pop es
     pop si
     pop ebp
     pop ebx
@@ -1449,6 +1484,16 @@ if ?SPIC ne 70h
     mov al,bPICS
     out 0A1h,al
 endif
+    .if inVCPImode
+        push bx
+        push cx
+        movzx bx,dl
+        movzx cx,dh
+        mov ax,0DE0Bh
+        int 67h
+        pop cx
+        pop bx
+    .endif
     ret
 setpic endp
 
@@ -1470,7 +1515,9 @@ backtoreal proc
     lss sp,dword ptr wStkBot
 
 ;--- restore PIC and IVT
-    mov dx,7008h
+    mov dx,vPIC
+    cmp dx,7008h
+    jne @@exit
     call setpic
     call restoreints
 
@@ -1517,20 +1564,21 @@ copy2x proc
     call xmsaddr
     pop bx
     pop ecx
-    .if si != offset emm3 ; HACK: Can't spoil bp from inside CopyInTable
-        cmp ax,1
-        mov bp, CStr("error copying to extended memory")
-        jnz @error
-    .else
-        cmp ax,1
-        stc
-        jnz @F
-        clc
+    cmp ax,1
+    stc
+    jnz @F
+    clc
 @@:
-    .endif
     add [si].EMM.dstofs,ecx
     ret
 copy2x endp
+
+copy2x_ordie proc
+    call copy2x
+    mov bp, CStr("error copying to extended memory")
+    jc @error
+    ret
+copy2x_ordie endp
 
 ;--- read a section and copy it to extended memory
 ;--- DI = 4 kB buffer
@@ -1576,7 +1624,7 @@ readsection proc
         sub esi, ecx
         push si
         mov si,offset emm2
-        call copy2x
+        call copy2x_ordie
         pop si
     .endw
     pop dx
@@ -1732,11 +1780,19 @@ local handle:word
     push dx
     push bx
     pop edi
+    .if ([PTbufseg] != 0) && ([PTbufseg] != -1)
+        mov es,[PTbufseg]
+;--- store EMB bases in otherwise-unused EMS page
+        movzx ebx,xmsidx
+        mov [es:6400h-8+ebx*8],edi
+        push ds
+        pop es
+    .endif
     push edi
     @dprintf "int31_504() clear region edi=%lX, esi=%lX kB", edi, esi
     call ClearRegion    ;clear region edi, size esi kb
-    jc error
     pop eax
+    jc error
     add eax,1000h-1
     ;and ax,0F000h
     shr eax,12
