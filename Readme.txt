@@ -60,9 +60,7 @@
   a) Overview
 
    The 32-bit binary runs in ring 0, 32-bit protected mode with PAE paging
-  enabled. PAE paging is not compatible with legacy 32-bit paging, hence
-  Dos32pae won't run as VCPI client within V86-monitors like (J)EMM386!
-  Also, since it's no DPMI ( although somewhat DPMI-like ), the binary won't
+  enabled. Since it's no DPMI ( although somewhat DPMI-like ), the binary won't
   run in DOS-Boxes - it needs plain DOS!
 
   b) DPMI API
