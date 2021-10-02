@@ -54,6 +54,8 @@ endif
 ;--- there's half a page free after the IDT (unlike in Dos64stb)
 ;--- use the first half of this half-page for a "kernel stack" in the main TSS
 ;--- and the second half for an alternative double-fault stack
+;--- (former not really needed since we really only provide for ring-0 operation,
+;--- but it doesn't really do any harm to have it there...)
 ?KSTKADR  equ ?IDTADDR+0C00h
 ?DFSTKADR equ ?IDTADDR+0FFCh
 
@@ -1525,12 +1527,42 @@ endif
         movzx bx,dl
         movzx cx,dh
         mov ax,0DE0Bh
-        int 67h
+        call doint67
         pop cx
         pop bx
     .endif
     ret
 setpic endp
+
+;--- int 67h wrapper that just calls it in VM86 mode
+;--- but goes through int 31h 0300h in protected mode
+;--- might have been easier to put an int 67h gate in our IDT,
+;--- but then what if someone installs something else over it...
+
+doint67 proc
+    push cs
+    cmp word ptr [esp],_TEXT ;in VM86 mode?
+    lea esp,[esp+2]          ;pop cs
+    jne @F
+    int 67h
+    ret
+
+@@:
+    sub esp,14h
+    pushad
+    xor ecx,ecx
+    mov [esp].RMCS.rFlags, 0202h
+    mov dword ptr [esp].RMCS.rES,ecx
+    mov dword ptr [esp].RMCS.rFS,ecx
+    mov [esp].RMCS.rSSSP, ecx
+    mov edi,esp
+    mov bx,21h
+    mov ax,0300h
+    int 31h
+    popad
+    lea esp,[esp+14h]
+    ret
+doint67 endp
 
 ;--- switch back to real-mode and exit
 
