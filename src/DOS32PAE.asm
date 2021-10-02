@@ -1553,7 +1553,7 @@ doint67 proc
     mov dword ptr [esp].RMCS.rFS,ecx
     mov [esp].RMCS.rSSSP, ecx
     mov edi,esp
-    mov bx,21h
+    mov bx,67h
     mov ax,0300h
     int 31h
     popad
