@@ -845,9 +845,6 @@ endif
     sti
 
 ;    call HandleRelocs
-    ; deliberate double-fault to test task gate
-    ;mov esp,1
-    ;pushad
 
     jmp cs:[retad]
 
