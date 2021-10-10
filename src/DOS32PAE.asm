@@ -422,6 +422,12 @@ start16 proc
 ;--- do VCPI setup work if necessary before transferring stuff into XMS mem
 
     .if inVCPImode
+        mov ah,41h ; get page frame address
+        int 67h
+        test ah,ah
+        jnz @@tryumb
+        mov [PTbufseg],bx
+
 ;--- allocate two EMS pages (i.e. eight 4k pages)
 ;--- first EMS page for temporary storage of PDPT/PDs/PTs before copying to XM
 ;--- second one for VCPI PT and VCPI PD (latter with only one entry)
@@ -432,31 +438,42 @@ start16 proc
         mov ah,43h ; allocate pages
         int 67h
         test ah,ah
-        jz @F
-        @fatexit "EMS allocation failed for page table buffer."
-@@:
+        jnz @@tryumb
         mov [emshdl],dx
-        mov ah,41h ; get page frame address
-        int 67h
-        test ah,ah
-        jz @F
-        @fatexit "EMS page frame inaccessible."
-@@:
-        mov [PTbufseg],bx
+
         mov ax,4400h ; map handle page, to zeroth "physical" page
         xor bx,bx    ; map the first EMS page of this handle
         int 67h
         test ah,ah
-        jz @F
-        @fatexit "Unable to map EMS page."
-@@:
+        jnz @@tryumb
+
         mov ax,4401h ; map handle page, to first "physical" page
         mov bx,1     ; map the second EMS page of this handle
         int 67h
         test ah,ah
-        jz @F
-        @fatexit "Unable to map EMS page."
-@@:
+        jz @@PTbufallocated
+
+@@tryumb:
+;--- no EMS page frame - try an XMS UMB instead...
+        mov ah,10h   ; request UMB
+        mov dx,sizeof PTbuflayout SHR 4
+        call xmsaddr
+        cmp ax,1
+        jne @@tryconv
+        mov [PTbufseg],bx
+        jz @@PTbufallocated
+
+@@tryconv:
+;--- agh, we need to allocate 28k of conventional memory! :(
+        mov ah,48h   ; request UMB
+        mov bx,sizeof PTbuflayout SHR 4
+        int 21h
+        mov [PTbufseg],ax
+        jnc @@PTbufallocated
+
+        @fatexit "Unable to allocate low-memory PT buffer"
+
+@@PTbufallocated:
 ;--- clear the EMS pages
         mov es,[PTbufseg]
         xor di,di
@@ -479,21 +496,24 @@ start16 proc
         and byte ptr es:[ecx*4-3],0F1h ; byte index n*4 - 3, where n > 0
         loop @B
 
+        .if !([PTbufseg] & 0FFh)
 ;--- get the physical addx of the PT we just filled in
-        mov di,[PTbufseg]
-        add di,PTbuflayout.vcpiPT SHR 4 ; convert offset to segment delta
-        ;shl edi,4      ; paragraphs to bytes
-        ;shr edi,12     ; bytes to pages
-        ;shl edi,2      ; page count to PT index
-        shr di,6
-        add di,PTbuflayout.vcpiPT
-        mov ebx,[es:di] ; physical addx of VCPI PT
-        add di,4
-        mov ecx,[es:di] ; physical addx of empty PD (very next page)
-        and cx,0F000h   ; get just the addx, no attrs
-        mov di,PTbuflayout.vcpiPD
-        mov [es:di],ebx ; put the PT addx at the beginning of the PD
-        mov vcpiCR3,ecx ; address of the PD for VCPI switch
+;--- (but only if it's page-aligned!)
+            mov di,[PTbufseg]
+            add di,PTbuflayout.vcpiPT SHR 4 ; convert offset to segment delta
+            ;shl edi,4      ; paragraphs to bytes
+            ;shr edi,12     ; bytes to pages
+            ;shl edi,2      ; page count to PT index
+            shr di,6
+            add di,PTbuflayout.vcpiPT
+            mov ebx,[es:di] ; physical addx of VCPI PT
+            add di,4
+            mov ecx,[es:di] ; physical addx of empty PD (very next page)
+            and cx,0F000h   ; get just the addx, no attrs
+            mov di,PTbuflayout.vcpiPD
+            mov [es:di],ebx ; put the PT addx at the beginning of the PD
+            mov vcpiCR3,ecx ; address of the PD for VCPI switch
+        .endif
 
         push ds
         pop es
@@ -585,6 +605,10 @@ endif
 ;---         max 4 pages for PD (4 * 512 * PDEs )
 ;--- total:  5 pages
     add edx, 5
+    .if inVCPImode && ([PTbufseg] & 0FFh)
+;--- PTbufseg not page-aligned, so need to move VCPI PT/PD (2 pages) into XM too
+        add edx,2
+    .endif
     inc edx     ;extra page since we need to align to page boundary
     shl edx, 2  ;convert to kB
 
@@ -746,7 +770,7 @@ make_exc_gates:
     mov emm.dstofs, eax
 
     mov si,offset emm
-    mov cx,800h
+    mov ecx,800h
     call copy2x_ordie
 
     add sp,4096
@@ -771,6 +795,32 @@ make_exc_gates:
     mov [pPageDir],eax
     push esi
     inc esi
+
+    .if inVCPImode && ([PTbufseg] & 0FFh)
+;--- PTbufseg not page-aligned, so need to move VCPI PT/PD (2 pages) into XM too
+        mov es,[PTbufseg]
+        mov word ptr emm.srcofs+2,es
+        mov word ptr emm.srcofs+0,PTbuflayout.vcpiPT
+        add emm.dstofs, 800h ; move to the next page
+
+        mov eax,esi
+        shl eax,12
+        mov [es:PTbuflayout.vcpiPD],eax
+        or [es:PTbuflayout.vcpiPD],11b
+        add eax, 1000h
+        mov [vcpiCR3],eax
+
+        push ds
+        pop es
+
+        push esi
+        mov si,offset emm
+        mov ecx,2000h
+        call copy2x_ordie
+        pop esi
+        add esi,2
+    .endif
+
 ife ?CONVBEG
     invoke CreateAddrSpace, ?CONVBEG*4096, ?CONVSIZE+1, esi
     add esi, eax
@@ -1612,6 +1662,9 @@ backtoreal proc
     cmp xmsaddr,0
     jz @F
     mov ah,6            ;local disable A20
+    call xmsaddr
+    mov ah,11h          ;release UMB
+    mov dx,[PTbufseg]
     call xmsaddr
 @@:
     mov ax,4c00h
