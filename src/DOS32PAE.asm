@@ -12,8 +12,8 @@
 ;--- To create the binary enter:
 ;---  JWasm -mz Dos32pae.asm
 
-    .model small
-DGROUP group _TEXT
+    .model tiny
+;DGROUP group _TEXT
     .stack 5120
     .dosseg
     .586p
@@ -24,6 +24,13 @@ DGROUP group _TEXT
 
 ?IRQ0TORM equ 1			;1=route IRQ 0 (clock) to real-mode
 ?IRQ1TORM equ 1			;1=route IRQ 1 (keyb) to real-mode
+ifndef ?KD
+?KD       equ 0			;1=support kernel debugger
+endif
+if ?KD
+    include debugsys.inc
+endif
+
 
 ;--- define "conventional" memory region seen by the application.
 ;--- default is 00000-FFFFF (begin 0, size 256 pages).
@@ -137,9 +144,16 @@ GDT dq 0                ; null descriptor
     dw -1,0,9200h,00CFh ; flat data descriptor
     dw -1,0,9A00h,0000h ; 16-bit DGROUP code descriptor
     dw -1,0,9200h,0000h ; 16-bit DGROUP data descriptor
+if ?KD
+SEL_KD equ $ - GDT
+    dw 0,0,0,0
+    dw 0,0,0,0
+    dw 0,0,0,0
+endif
+SIZEGDT equ $ - GDT
 
 GDTR label fword        ; Global Descriptors Table Register
-    dw 5*8-1            ; limit of GDT (size minus one)
+    dw SIZEGDT-1        ; limit of GDT (size minus one)
     dd offset GDT       ; linear address of GDT
 IDTR label fword        ; Interrupt Descriptor Table Register
     dw 256*8-1          ; limit of IDT (size minus one)
@@ -167,6 +181,9 @@ nxtLinAddr dd ?
 fhandle dw -1	;DOS file handle for image
 wFlags  dw ?	;used to temporarily store real mode flags
 xmsidx  dw 0
+if ?KD
+pminit  df 0
+endif
 if ?MPIC ne 8
 bPICM   db ?
 endif
@@ -454,6 +471,26 @@ endif
     int 21h
     mov fhandle,-1
 
+if ?KD
+	mov ah, D386_Identify
+	int D386_RM_Int
+	cmp ax, D386_Id
+	jnz @F
+	push di
+	mov bx, SEL_FLATDS
+	mov cx, SEL_KD
+	mov dx, 0	; no GDT sel
+	mov si, offset GDT
+	mov ah, D386_Prepare_PMode
+	int D386_RM_Int
+	mov dword ptr [pminit+0], edi
+	mov  word ptr [pminit+4], es
+	push ds
+	pop es
+	pop di
+@@:
+endif
+
 ;--- create IDT
 
     mov ebx, _TEXT32
@@ -600,10 +637,23 @@ endif
     xor ax,ax
     mov fs,ax
     mov gs,ax
-    sti
 
 ;    call HandleRelocs
 
+if ?KD
+	cmp word ptr cs:[pminit+4],0
+	jz nokd
+	db 0eah		; do a far16 jmp to load CS with a valid selector
+	dw @F
+	dw SEL_CODE16
+@@:
+	mov edi, ?IDTADDR
+	mov al, PMINIT_INIT_IDT
+	call cs:[pminit]
+nokd:
+endif
+
+    sti
     jmp cs:[retad]
 
 @error::

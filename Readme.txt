@@ -105,6 +105,12 @@
   Paging tables aren't mapped at all - hence the full address space above
   the IDT up to 0xffffffff may be used by the application.
 
+  d) Kernel Debugger Support
+
+   Dos32pae can be build with support for a kernel debugger (Deb386). Thus it's
+  possible to debug the applications at least at the assembly level. See
+  Makefile for details.
+
 
   5. How to build Dos32pae
 

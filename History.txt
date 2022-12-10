@@ -1,0 +1,6 @@
+
+  __/____: v1.1
+    - support for kernel debugger Deb386 added.
+
+  03/2021: v1.0
+    - initial.
